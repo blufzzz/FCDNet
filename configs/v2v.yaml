@@ -1,0 +1,28 @@
+distributed_train: false
+experiment_dir: './logs'
+interpolation_size: [128, 128, 128]  #[91,109,91]
+make_logs: False
+
+opt:
+  criterion: "CE"
+
+  start_epoch: 0
+  n_epochs: 9999
+  dump_weights: False
+
+  train_batch_size: 1
+  val_batch_size: 1
+
+  lr: 0.0001
+
+  save_model: true
+  silence: false
+  grad_clip: 0.01
+
+model:
+  name: "v2v" 
+  input_channels: 1
+  output_channels: 1
+  max_channel_encoder_decoder: 32
+
+
