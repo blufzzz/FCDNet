@@ -9,7 +9,7 @@ import json
 from collections import defaultdict
 import pickle
 import numpy as np
-
+import pandas as pd
 import torch
 from torch import nn
 from torch import autograd
@@ -23,18 +23,54 @@ from models.v2v import V2VModel
 import yaml
 from easydict import EasyDict as edict
 
-class CatBrainMaskLoader(Dataset):
 
-    def __init__(self, root):
-        self.root = root
-        self.paths = [os.path.join(root, p) for p in os.listdir(root)]
+class CatBrainMaskPatchLoader(Dataset):
+    
+    def __init__(self, config, train=True):
+        self.root = config.root
+        self.train = train
+        self.patch_size = config.patch_size
+        
+        which_metadata = 'train' if train else 'test' 
+        self.metadata = pd.read_csv(os.path.join(self.root, f'metadata_{which_metadata}'))
 
     def __getitem__(self, idx):
-        brain_tensor_torch, mask_tensor_torch = torch.load(self.paths[idx])
-        return brain_tensor_torch, mask_tensor_torch
+        
+        metaindex = self.metadata.iloc[idx]
+        
+        tensor = torch.load(os.path.join(self.root, f'tensor_{metaindex.label}'))
+        x,y,z = metaindex[['x','y','z']].astype(int)
+
+        x1,x2 = x-self.patch_size//2, x+self.patch_size//2
+        y1,y2 = y-self.patch_size//2, y+self.patch_size//2
+        z1,z2 = z-self.patch_size//2, z+self.patch_size//2
+
+        brain_patch = tensor[0,x1:x2,y1:y2,z1:z2] # brain 
+        label_patch = tensor[-1,x1:x2,y1:y2,z1:z2] # label
+    
+        return brain_patch, label_patch
 
     def __len__(self):
-        return len(self.paths)
+        return self.metadata.shape[0]
+
+
+class CatBrainMaskLoader(Dataset):
+
+    def __init__(self, config, train=True):
+        raise RuntimeError
+
+    # def __init__(self, config, train=True):
+    #     self.root = config.root
+    #     self.train = train
+    #     self.data_path = os.path.join(self.root, 'train' if self.train else 'test')
+    #     self.paths = [os.path.join(data_path, p) for p in os.listdir(data_path)]
+
+    # def __getitem__(self, idx):
+    #     brain_tensor_torch, mask_tensor_torch = torch.load(self.paths[idx])
+    #     return brain_tensor_torch, mask_tensor_torch
+
+    # def __len__(self):
+    #     return len(self.paths)
 
 
 def parse_args():
@@ -44,6 +80,21 @@ def parse_args():
     parser.add_argument('--experiment_comment', default='', type=str)
     args = parser.parse_args()
     return args
+
+
+def create_datesets(config):
+
+    if config.dataset.dataset_type == 'whole_brain': 
+        train_dataset = CatBrainMaskLoader(config.dataset, train=True)
+        val_dataset = CatBrainMaskLoader(config.dataset, train=True)
+    elif config.dataset.dataset_type == 'patches':
+        train_dataset = CatBrainMaskPatchLoader(config.dataset, train=True)
+        val_dataset = CatBrainMaskPatchLoader(config.dataset, train=False)
+    else:
+        raise RuntimeError('Wrond `dataset_type`!')
+
+    return train_dataset, val_dataset
+
 
 def one_epoch(model, criterion, opt, config, dataloader, device, writer, epoch, metric_dict_epoch, is_train=True):
 
@@ -59,8 +110,9 @@ def one_epoch(model, criterion, opt, config, dataloader, device, writer, epoch, 
             brain_tensor = brain_tensor.unsqueeze(1).to(device)
             mask_tensor = mask_tensor.unsqueeze(1).to(device)
 
-            brain_tensor = F.interpolate(brain_tensor, config.interpolation_size)
-            mask_tensor = F.interpolate(mask_tensor, config.interpolation_size)
+            if config.interpolate:
+                brain_tensor = F.interpolate(brain_tensor, config.interpolation_size)
+                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size)
 
             # forward pass
             mask_tensor_predicted = model(brain_tensor)
@@ -79,7 +131,8 @@ def one_epoch(model, criterion, opt, config, dataloader, device, writer, epoch, 
             phase_name = 'train' if is_train else 'val'
             if writer is not None:
                 writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
-            print(f'Epoch value: {phase_name} {title}= {m}')
+            if not config.silent:
+                print(f'Epoch value: {phase_name} {title}= {m}')
             metric_dict_epoch[phase_name + '_' + title].append(m)
 
     except Exception as e:
@@ -101,20 +154,23 @@ def main(args):
     print("Experiment name: {}".format(experiment_name))
     experiment_dir = os.path.join(args.logdir, experiment_name)
 
+    if os.path.isdir(experiment_dir):
+        shutil.rmtree(experiment_dir)
+    os.makedirs(experiment_dir)
+
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
     model = V2VModel(config).to(device)
     print('Model created!')
 
     # setting datasets
-    train_dataset = CatBrainMaskLoader('../fcd_newdataset_tensors/train')
-    val_dataset = CatBrainMaskLoader('../fcd_newdataset_tensors/test')
-
+    train_dataset, val_dataset = create_datesets(config)
     train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=True)
 
     # setting model stuff
     criterion = {
-        "CE": torch.nn.BCEWithLogitsLoss()
+        "CE": torch.nn.BCEWithLogitsLoss(),
+        "FDice": None
     }[config.opt.criterion]
 
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
@@ -126,11 +182,31 @@ def main(args):
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
             print (f'TRAIN EPOCH: {epoch} ... ')
-            one_epoch(model, criterion, opt, config, train_dataloader, device, writer, epoch, metric_dict_epoch, is_train=True)
+            one_epoch(model, 
+                        criterion, 
+                        opt, 
+                        config, 
+                        train_dataloader, 
+                        device, 
+                        writer, 
+                        epoch, 
+                        metric_dict_epoch, 
+                        is_train=True)
+
             print (f'VAL EPOCH: {epoch} ... ')
-            one_epoch(model, criterion, opt, config, val_dataloader, device, writer, epoch, metric_dict_epoch, is_train=False)
+            one_epoch(model, 
+                        criterion, 
+                        opt, 
+                        config, 
+                        val_dataloader, 
+                        device, 
+                        writer, 
+                        epoch, 
+                        metric_dict_epoch, 
+                        is_train=False)
     except:
-        np.save('metric_dict_epoch', metric_dict_epoch)
+        # keyboard interrupt
+        np.save(os.path.join(experiment_dir, 'metric_dict_epoch'), metric_dict_epoch)
 
 if __name__ == '__main__':
     args = parse_args()
