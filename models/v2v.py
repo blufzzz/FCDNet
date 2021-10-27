@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+from IPython.core.debugger import set_trace
 
 # from https://github.com/blufzzz/learnable-triangulation-pytorch/blob/master/mvn/models/v2v.py
 
@@ -146,6 +147,7 @@ class V2VModel(nn.Module):
         max_channel = config.model.max_channel_encoder_decoder
 
         self.front_layers = nn.Sequential(
+            nn.BatchNorm3d(input_channels), # HACK FOR GEOM FEATURES
             Basic3DBlock(input_channels, 16, 7),
             Res3DBlock(16, 32),
             Res3DBlock(32, 32),
@@ -169,6 +171,9 @@ class V2VModel(nn.Module):
         x = self.encoder_decoder(x)
         x = self.back_layers(x)
         x = self.output_layer(x)
+
+        x = F.softmax(x, dim=1)
+
         return x
 
     def _initialize_weights(self):

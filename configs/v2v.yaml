@@ -1,35 +1,37 @@
 distributed_train: false # not working
 experiment_dir: './logs'
 interpolate: false
-interpolation_size: [64, 64, 64]  #[91,109,91]
+interpolation_size: [64, 64, 64] 
 make_logs: true
 silent: false
 
+
 opt:
+  device: 3
   criterion: "CE"
 
   start_epoch: 0
   n_epochs: 9999
-  dump_weights: False
 
-  train_batch_size: 10
-  val_batch_size: 10
+  train_batch_size: 5
+  val_batch_size: 5
 
-  lr: 0.0001
+  lr: 0.0005
 
   save_model: true
-  grad_clip: 0.01
+  grad_clip: 0.01 # not implemented
 
 
 model:
   name: "v2v" 
-  input_channels: 1
-  output_channels: 1
+  input_channels: 1 # 1 + N_features
+  output_channels: 2 # FCD and background
   max_channel_encoder_decoder: 32
 
 
 
 dataset:
+  use_features: false
   root: '../fcd_data/patches_dataset_64_features'
   dataset_type: 'patches'
   patch_size: 64
