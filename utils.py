@@ -2,6 +2,66 @@ import numpy as np
 from matplotlib import pyplot as plt
 import torch
 from IPython.core.debugger import set_trace
+from collections import defaultdict
+import glob
+import os
+import nibabel
+
+def create_dicts(root_label,
+                 root_data,
+                 root_geom_features, 
+                 USE_GEOM_FEATURES, 
+                 GEOM_FEATURES):
+    
+    paths_dict = defaultdict(dict)
+    for p in os.listdir(root_label):
+
+        label = p.split('.')[0]
+        
+        sub_root = os.path.join(root_data, f'sub-{label}/anat/')
+            
+        brain_path = glob.glob(os.path.join(sub_root, '*Asym_desc-preproc_T1w.nii.gz'))[0]
+        mask_path = glob.glob(os.path.join(sub_root, '*Asym_desc-brain_mask.nii.gz'))[0]
+        label_path = os.path.join(root_label, p) 
+
+        paths_dict[label]['label'] = label_path
+        paths_dict[label]['brain'] = brain_path    
+        paths_dict[label]['mask'] = mask_path  
+
+        # features
+
+        if USE_GEOM_FEATURES:
+            for g in GEOM_FEATURES:
+                g_path = os.path.join(root_geom_features, f'{g}/norm-{label}.nii')
+                paths_dict[label][g] = g_path    
+                
+    return paths_dict
+
+
+
+def normalized(brain_tensor):
+    
+    return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
+
+def load(path_dict):
+
+    mask_tensor = nibabel.load(path_dict['mask']).get_fdata() > 0
+    mask_tensor_int = mask_tensor.astype(int) 
+    brain_tensor = nibabel.load(path_dict['brain']).get_fdata() * mask_tensor_int
+    label_tensor = nibabel.load(path_dict['label']).get_fdata() * mask_tensor_int
+    label_tensor = (label_tensor > 0).astype('int')
+
+    # SHAPE = label_tensor.shape
+
+    # geom_features = []
+    # for k,v in path_dict.items():
+    #     if k not in ['mask', 'brain', 'label']:
+    #         geom_features.append()
+    #     assert SHAPE == v.shape
+
+    
+    return [brain_tensor, mask_tensor, label_tensor]
+
 
 def show_slices(brain_tensor, n_slices_show=5, mask_tensor=None):
     

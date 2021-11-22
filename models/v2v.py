@@ -142,6 +142,7 @@ class V2VModel(nn.Module):
     def __init__(self, config):
         super().__init__()
 
+        self.sigmoid = config.model.sigmoid
         input_channels = config.model.input_channels
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
@@ -167,14 +168,18 @@ class V2VModel(nn.Module):
         self._initialize_weights()
 
     def forward(self, x):
+
+        # x - [bs, C, x,x,x]
+
         x = self.front_layers(x)
         x = self.encoder_decoder(x)
         x = self.back_layers(x)
         x = self.output_layer(x)
 
-        x = F.softmax(x, dim=1)
-
-        return x
+        if self.sigmoid:
+            return x.sigmoid()
+        else:
+            return x
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -186,3 +191,31 @@ class V2VModel(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 # nn.init.normal_(m.weight, 0, 0.001)
                 nn.init.constant_(m.bias, 0)
+
+
+
+
+class ResNet3D(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+    def forward(self, x):
+
+        pass
+
+        # self.sigmoid = config.model.sigmoid
+        # input_channels = config.model.input_channels
+        # max_channel = config.model.max_channel_encoder_decoder
+
+        # self.front_layers = nn.Sequential(
+        #     Basic3DBlock(input_channels, 16, 7),
+        #     Res3DBlock(16, 32),
+        #     Res3DBlock(32, 32),
+        #     Res3DBlock(32, 32)
+        # )
+
+        # self.encoder
+
+        # self.encoder_decoder = EncoderDecorder(max_channel)
+

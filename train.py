@@ -34,24 +34,40 @@ def save(experiment_dir, model, opt, epoch):
     torch.save(dict_to_save, os.path.join(checkpoint_dir, "weights.pth"))
 
 
-def DiceLoss(input, target):
+def DiceScoreBinary(input, 
+                    target, 
+                    include_backgroud=False, 
+                    weights=None):
     '''
-    Binary Dice loss
-    target - binary mask [bs,1,ps,ps,ps]
-    input - [bs,2,ps,ps,ps]
+    Binary Dice score
+    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
+    input - [bs,1,ps,ps,ps], probability [0,1]
     '''
 
     # create "background" class
-
-    target_float = target.unsqueeze(1).type(input.dtype)
-    background_tensor = torch.abs(target_float- 1)
-    target_stacked = torch.cat([background_tensor, target_float], dim=1) # [bs,2,ps,ps,ps]
-
-    intersection = torch.sum(input * target_stacked, dim=(1,2,3,4)) # [bs,]
-    cardinality = torch.sum(input + target_stacked, dim=(1,2,3,4)) # [bs,]
-
-    dice_score = 2. * intersection / (cardinality + 1e-7)
-    return torch.mean(1. - dice_score)
+    
+    if include_backgroud:
+        target_float = target.type(input.dtype)
+        background_tensor = torch.abs(target_float - 1.)
+        target_stacked = torch.cat([background_tensor, target_float], dim=1) # [bs,2,ps,ps,ps]
+        input_stacked = torch.cat([1-input, input], dim=1) # [bs,2,ps,ps,ps]
+        
+        intersection = torch.sum(input_stacked * target_stacked, dim=(2,3,4)) # [bs,2]
+        cardinality = torch.sum(torch.pow(input_stacked,2) + torch.pow(target_stacked,2), dim=(2,3,4)) # [bs,2]
+        dice_score = 2. * intersection / (cardinality + 1e-7) # [bs,2]
+        
+        if weights is not None:
+            dice_score = (dice_score*weights).sum(1)
+        
+    else:
+        target = target.squeeze(1) # cast to float and squeeze channel # .type(input.dtype)
+        input = input.squeeze(1) # squeeze channel
+        
+        intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
+        cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
+        dice_score = 2. * intersection / (cardinality + 1e-7)
+        
+    return dice_score.mean()
 
 
 class CatBrainMaskPatchLoader(Dataset):
@@ -62,14 +78,15 @@ class CatBrainMaskPatchLoader(Dataset):
         self.patch_size = config.patch_size
         self.use_features = config.use_features
 
-        which_metadata = 'train' if train else 'test' 
-        self.metadata = pd.read_csv(os.path.join(self.root, f'metadata_{which_metadata}'))
+        metadata_name = 'metadata_' + ('train' if train else 'test') 
+        self.metadata = pd.read_csv(os.path.join(self.root, metadata_name))
 
     def __getitem__(self, idx):
         
         metaindex = self.metadata.iloc[idx]
         
-        tensor = torch.load(os.path.join(self.root, f'tensor_{metaindex.label}'))
+        label = 'tensor_' + metaindex.label
+        tensor = torch.load(os.path.join(self.root, label))
         x,y,z = metaindex[['x','y','z']].astype(int)
 
         x1,x2 = x-self.patch_size//2, x+self.patch_size//2
@@ -82,7 +99,7 @@ class CatBrainMaskPatchLoader(Dataset):
             brain_patch = tensor[0:1,x1:x2,y1:y2,z1:z2] # brain 
         label_patch = tensor[-1,x1:x2,y1:y2,z1:z2] # label
     
-        return brain_patch, label_patch
+        return brain_patch, label_patch.unsqueeze(0)
 
     def __len__(self):
         return self.metadata.shape[0]
@@ -93,18 +110,18 @@ class CatBrainMaskLoader(Dataset):
     def __init__(self, config, train=True):
         raise RuntimeError
 
-    # def __init__(self, config, train=True):
-    #     self.root = config.root
-    #     self.train = train
-    #     self.data_path = os.path.join(self.root, 'train' if self.train else 'test')
-    #     self.paths = [os.path.join(data_path, p) for p in os.listdir(data_path)]
+    def __init__(self, config, train=True):
+        self.root = config.root
+        self.train = train
+        self.data_path = os.path.join(self.root, 'train' if self.train else 'test')
+        self.paths = [os.path.join(self.data_path, p) for p in os.listdir(self.data_path)]
 
-    # def __getitem__(self, idx):
-    #     brain_tensor_torch, mask_tensor_torch = torch.load(self.paths[idx])
-    #     return brain_tensor_torch, mask_tensor_torch
+    def __getitem__(self, idx):
+        brain_tensor_torch, mask_tensor_torch = torch.load(self.paths[idx])
+        return brain_tensor_torch.unsqueeze(0), mask_tensor_torch.unsqueeze(0)
 
-    # def __len__(self):
-    #     return len(self.paths)
+    def __len__(self):
+        return len(self.paths)
 
 
 def parse_args():
@@ -118,9 +135,9 @@ def parse_args():
 
 def create_datesets(config):
 
-    if config.dataset.dataset_type == 'whole_brain': 
+    if config.dataset.dataset_type == 'interpolated': 
         train_dataset = CatBrainMaskLoader(config.dataset, train=True)
-        val_dataset = CatBrainMaskLoader(config.dataset, train=True)
+        val_dataset = CatBrainMaskLoader(config.dataset, train=False)
     elif config.dataset.dataset_type == 'patches':
         train_dataset = CatBrainMaskPatchLoader(config.dataset, train=True)
         val_dataset = CatBrainMaskPatchLoader(config.dataset, train=False)
@@ -143,6 +160,7 @@ def one_epoch(model,
                 is_train=True):
 
     phase_name = 'train' if is_train else 'val'
+    loss_name = config.opt.criterion
     metric_dict = defaultdict(list)
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
@@ -153,30 +171,32 @@ def one_epoch(model,
 
             # prepare
             brain_tensor = brain_tensor.to(device) # [bs,1,ps,ps,ps]
-            mask_tensor = mask_tensor.type(torch.long).to(device) # [bs,ps,ps,ps]
+            mask_tensor = mask_tensor.to(device) # [bs,ps,ps,ps]
 
             if config.interpolate:
-                brain_tensor = F.interpolate(brain_tensor, config.interpolation_size)
-                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size)
-
+                brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
+                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device) # unsqueeze channel
+            else:
+                brain_tensor = brain_tensor.to(device)
+                mask_tensor = mask_tensor.to(device)
 
             # forward pass
             mask_tensor_predicted = model(brain_tensor) # [bs,2,ps,ps,ps]
-            ce_loss = criterion(mask_tensor_predicted, mask_tensor)
 
+            loss = criterion(mask_tensor_predicted, mask_tensor)
 
             if is_train:
                 opt.zero_grad()
-                ce_loss.backward()
+                loss.backward()
                 opt.step()
 
-            metric_dict['ce_loss'].append(ce_loss.item())
+            metric_dict[f'{loss_name}'].append(loss.item())
 
-            # Dice loss
-            dice_loss = DiceLoss(mask_tensor_predicted, mask_tensor)
-            metric_dict['dice_loss'].append(dice_loss.item())
+            # Dice score
+            dice_score = DiceScoreBinary(mask_tensor_predicted, mask_tensor)
+            metric_dict['dice_score'].append(dice_score.item())
 
-            print(f'Epoch: {epoch}, iter: {iter_i}, ce_loss: {ce_loss.item()}, dice_loss: {dice_loss.item()}')
+            print(f'Epoch: {epoch}, iter: {iter_i}, {loss_name}: {loss.item()}, dice_score: {dice_score.item()}')
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -214,6 +234,9 @@ def main(args):
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
+
+    # os.system(f'CUDA_VISIBLE_DEVICES={DEVICE}')
+
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
     
@@ -223,6 +246,8 @@ def main(args):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
 
+        shutil.copy(args.config, os.path.join(experiment_dir, "config.yaml"))
+
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
     model = V2VModel(config).to(device)
     print('Model created!')
@@ -230,11 +255,12 @@ def main(args):
     # setting datasets
     train_dataset, val_dataset = create_datesets(config)
     train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=True)
-
+    val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
+    print(len(train_dataloader), len(val_dataloader))
     # setting model stuff
     criterion = {
         "CE": torch.nn.CrossEntropyLoss(),
+        "BCE": torch.nn.BCELoss(),
         "FDice": None
     }[config.opt.criterion]
 

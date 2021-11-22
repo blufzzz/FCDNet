@@ -1,37 +1,36 @@
 distributed_train: false # not working
 experiment_dir: './logs'
-interpolate: false
-interpolation_size: [64, 64, 64] 
-make_logs: true
+interpolate: true
+interpolation_size: [128, 128, 128] 
+make_logs: false
 silent: false
 
-
 opt:
-  device: 3
-  criterion: "CE"
+  device: 0
+  criterion: "BCE"
 
   start_epoch: 0
   n_epochs: 9999
 
-  train_batch_size: 5
-  val_batch_size: 5
+  train_batch_size: 1
+  val_batch_size: 1
 
   lr: 0.0005
 
-  save_model: true
+  save_model: false
   grad_clip: 0.01 # not implemented
-
 
 model:
   name: "v2v" 
   input_channels: 1 # 1 + N_features
-  output_channels: 2 # FCD and background
+  output_channels: 1 # FCD and background
   max_channel_encoder_decoder: 32
-
-
+  sigmoid: true
 
 dataset:
   use_features: false
-  root: '../fcd_data/patches_dataset_64_features'
-  dataset_type: 'patches'
+  root: '../fcd_data/normalized_brain_label_tensors' 
+  # root: '../fcd_data/patches_dataset_64_features'
+  dataset_type: 'interpolated'
+  # dataset_type: 'patches'
   patch_size: 64
