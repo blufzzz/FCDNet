@@ -143,12 +143,14 @@ class V2VModel(nn.Module):
         super().__init__()
 
         self.sigmoid = config.model.sigmoid
-        input_channels = config.model.input_channels
+        # geom features
+        input_channels = len(config.dataset.features) if hasattr(config.dataset,'features') else 0
+        input_channels += 1 # MRI brain itself
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
 
         self.front_layers = nn.Sequential(
-            nn.BatchNorm3d(input_channels), # HACK FOR GEOM FEATURES
+            nn.BatchNorm3d(input_channels), 
             Basic3DBlock(input_channels, 16, 7),
             Res3DBlock(16, 32),
             Res3DBlock(32, 32),

@@ -17,7 +17,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.parallel import DistributedDataParallel
-
+from utils import trim
+from sklearn.metrics import accuracy_score, roc_auc_score
 from models.v2v import V2VModel
 
 import yaml
@@ -60,49 +61,15 @@ def DiceScoreBinary(input,
             dice_score = (dice_score*weights).sum(1)
         
     else:
+
         target = target.squeeze(1) # cast to float and squeeze channel # .type(input.dtype)
         input = input.squeeze(1) # squeeze channel
         
         intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
         cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
         dice_score = 2. * intersection / (cardinality + 1e-7)
-        
+
     return dice_score.mean()
-
-
-class CatBrainMaskPatchLoader(Dataset):
-    
-    def __init__(self, config, train=True):
-        self.root = config.root
-        self.train = train
-        self.patch_size = config.patch_size
-        self.use_features = config.use_features
-
-        metadata_name = 'metadata_' + ('train' if train else 'test') 
-        self.metadata = pd.read_csv(os.path.join(self.root, metadata_name))
-
-    def __getitem__(self, idx):
-        
-        metaindex = self.metadata.iloc[idx]
-        
-        label = 'tensor_' + metaindex.label
-        tensor = torch.load(os.path.join(self.root, label))
-        x,y,z = metaindex[['x','y','z']].astype(int)
-
-        x1,x2 = x-self.patch_size//2, x+self.patch_size//2
-        y1,y2 = y-self.patch_size//2, y+self.patch_size//2
-        z1,z2 = z-self.patch_size//2, z+self.patch_size//2
-
-        if self.use_features:
-            brain_patch = tensor[0:-1,x1:x2,y1:y2,z1:z2] # brain 
-        else:
-            brain_patch = tensor[0:1,x1:x2,y1:y2,z1:z2] # brain 
-        label_patch = tensor[-1,x1:x2,y1:y2,z1:z2] # label
-    
-        return brain_patch, label_patch.unsqueeze(0)
-
-    def __len__(self):
-        return self.metadata.shape[0]
 
 
 class CatBrainMaskLoader(Dataset):
@@ -113,12 +80,40 @@ class CatBrainMaskLoader(Dataset):
     def __init__(self, config, train=True):
         self.root = config.root
         self.train = train
-        self.data_path = os.path.join(self.root, 'train' if self.train else 'test')
-        self.paths = [os.path.join(self.data_path, p) for p in os.listdir(self.data_path)]
+        self.trim_background = config.trim_background
+
+        self.metadata = metadata = np.load('metadata.npy',allow_pickle=True).item()
+        metadata_key = 'train' if self.train else 'test'
+        self.labels = self.metadata[metadata_key]
+
+        self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]
+        
+        self.use_features = config.use_features
+        self.features = config.features if hasattr(config, 'features') else None
 
     def __getitem__(self, idx):
-        brain_tensor_torch, mask_tensor_torch = torch.load(self.paths[idx])
-        return brain_tensor_torch.unsqueeze(0), mask_tensor_torch.unsqueeze(0)
+
+        tensor_dict = torch.load(self.paths[idx])
+        brain_tensor_torch = tensor_dict['brain']
+        mask_tensor_torch = tensor_dict['mask']
+        label_tensor_torch = tensor_dict['label']
+
+        if self.use_features:
+            assert self.features is not None
+            brain_tensor_torch = torch.stack([brain_tensor_torch] + \
+                                            [tensor_dict[f] for f in self.features],
+                                            dim=0)
+        else:
+            brain_tensor_torch = brain_tensor_torch.unsqueeze(0)
+
+        if self.trim_background:
+            brain_tensor_torch, mask_tensor_torch, label_tensor_torch = trim(brain_tensor_torch, 
+                                                                                mask_tensor_torch, 
+                                                                                label_tensor_torch)
+
+        return brain_tensor_torch,\
+                mask_tensor_torch.unsqueeze(0),\
+                label_tensor_torch.unsqueeze(0)
 
     def __len__(self):
         return len(self.paths)
@@ -167,23 +162,33 @@ def one_epoch(model,
     with grad_context():
         iterator = enumerate(dataloader)
 
-        for iter_i, (brain_tensor, mask_tensor) in iterator:
+        if TASK == 'classification':
+            predictions = []
+            ground_truth = []
+
+
+        for iter_i, (brain_tensor, _, label_tensor) in iterator:
 
             # prepare
-            brain_tensor = brain_tensor.to(device) # [bs,1,ps,ps,ps]
-            mask_tensor = mask_tensor.to(device) # [bs,ps,ps,ps]
+            brain_tensor = brain_tensor # [bs,1,ps,ps,ps]
+            label_tensor = label_tensor # [bs,ps,ps,ps]
 
             if config.interpolate:
                 brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
-                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device) # unsqueeze channel
+                label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device) # unsqueeze channel
             else:
                 brain_tensor = brain_tensor.to(device)
-                mask_tensor = mask_tensor.to(device)
+                label_tensor = label_tensor.to(device)
 
+            # set_trace()
             # forward pass
-            mask_tensor_predicted = model(brain_tensor) # [bs,2,ps,ps,ps]
+            label_tensor_predicted = model(brain_tensor) # [bs,2,ps,ps,ps]
+            # set_trace()
+            loss = criterion(label_tensor_predicted, label_tensor)
 
-            loss = criterion(mask_tensor_predicted, mask_tensor)
+            if TASK == 'classification':
+                predictions.append(label_tensor_predicted.detach().cpu().numpy())
+                ground_truth.append(label_tensor.detach().cpu().numpy())
 
             if is_train:
                 opt.zero_grad()
@@ -192,11 +197,28 @@ def one_epoch(model,
 
             metric_dict[f'{loss_name}'].append(loss.item())
 
-            # Dice score
-            dice_score = DiceScoreBinary(mask_tensor_predicted, mask_tensor)
-            metric_dict['dice_score'].append(dice_score.item())
+            if TASK == 'segmentation':
+                dice_score = DiceScoreBinary(label_tensor_predicted, label_tensor)
+                metric_dict['dice_score'].append(dice_score.item())
 
-            print(f'Epoch: {epoch}, iter: {iter_i}, {loss_name}: {loss.item()}, dice_score: {dice_score.item()}')
+            else:
+
+                y_pred = predictions[-1]
+                y = ground_truth[-1]
+
+                accuracy = accuracy_score(label_tensor, label_tensor_predicted)
+                metric_dict['accuracy'].append(accuracy)
+
+                roc_auc = roc_auc_score(label_tensor, label_tensor_predicted)
+                metric_dict['roc_auc'].append(roc_auc)
+
+                hitrate10 = hitrate10(label_tensor, label_tensor_predicted)
+                metric_dict['hitrate10'].append(hitrate10)
+
+
+            print(f'Epoch: {epoch}, iter: {iter_i}, {loss_name}: {loss.item()}')
+            for k,v in metric_dict.items():
+                print(k, v[-1])
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -217,6 +239,14 @@ def one_epoch(model,
     except Exception as e:
         print ('Exception:', str(e), 'Failed to save writer')
 
+    ######################################
+    # CALCULATING CLASSIFICATION METRICS #
+    ######################################
+    if TASK == 'classification':
+        y_pred = np.concatenate(predictions) # [N,1]
+        y = np.concatenate(ground_truth) # [N,1]
+
+        
 
     return n_iters_total
 
@@ -234,6 +264,7 @@ def main(args):
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
+    TASK = config.opt.task if hasattr(config.opt, 'task') else 'segmentation'
 
     # os.system(f'CUDA_VISIBLE_DEVICES={DEVICE}')
 
@@ -259,9 +290,9 @@ def main(args):
     print(len(train_dataloader), len(val_dataloader))
     # setting model stuff
     criterion = {
-        "CE": torch.nn.CrossEntropyLoss(),
-        "BCE": torch.nn.BCELoss(),
-        "FDice": None
+        # "CE": torch.nn.CrossEntropyLoss(),
+        "BCE": torch.nn.BCELoss(), # [probabilities, target]
+        "FDice": None,
     }[config.opt.criterion]
 
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
@@ -302,6 +333,7 @@ def main(args):
 
             if SAVE_MODEL:
                 save(experiment_dir, model, opt, epoch)
+
     except:
         # keyboard interrupt
         if MAKE_LOGS:
