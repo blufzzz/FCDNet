@@ -9,32 +9,65 @@ from IPython.core.display import HTML
 import os
 import nibabel
 
-def video_comparison(brain_tensor, mask_tensor_real, mask_tensor_pred, n_slides=64):
+
+def video(brain_tensor, mask_tensor=None, n_slides=100):
     
-    fig, ax = plt.subplots(1,2)
+    '''
+    brain_tensor - single ndarray brain [H,W,D]
+    '''
+    
+    fig, ax = plt.subplots()
     X_max, Y_max, Z_max = brain_tensor.shape
     camera = Camera(fig)
     
-    for i in range(n_slides):
-        
-        y_slice_pos = (Y_max//(n_slides+2))*(i+1)
+    for y_slice_pos in np.linspace(0,Y_max-1, n_slides, dtype=int):
         
         brain_tensor_slice = brain_tensor[:,y_slice_pos,:]
-        ax[0].imshow(brain_tensor_slice, 'gray')
-        ax[1].imshow(brain_tensor_slice, 'gray')
+        ax.imshow(brain_tensor_slice, 'gray')
         
-        mask_tensor_real_slice = mask_tensor_real[:,y_slice_pos,:]
-        mask_tensor_pred_slice = mask_tensor_pred[:,y_slice_pos,:]
-        
-        ax[0].imshow(mask_tensor_real_slice, 'jet', interpolation='none', alpha=0.7)
-        ax[1].imshow(mask_tensor_pred_slice, 'jet', interpolation='none', alpha=0.7)
-        
-        ax[0].set_title('GT')
-        ax[1].set_title('Pred')
+        if mask_tensor is not None:
+            mask_tensor_slice = mask_tensor[:,y_slice_pos,:]
+            ax.imshow(mask_tensor_slice, 'jet', interpolation='none', alpha=0.7)
         
         camera.snap()
         
     return camera   
+    
+
+def video_comparison(brains, masks=None, titles=None, n_slides=64):
+    
+    '''
+    brains - list of ndarray [H,W,D] brains 
+    '''
+    
+    N = len(brains)
+    fig, ax = plt.subplots(1,N, sharex=True, sharey=True)
+    X_max, Y_max, Z_max = brains[0].shape
+    camera = Camera(fig)
+    
+    ax_iterator = ax if N > 1 else [ax]
+    
+    for y_slice_pos in np.linspace(0,Y_max-1, n_slides, dtype=int):
+        
+        for i,ax in enumerate(ax_iterator):
+            
+            brain_slice = brains[i][:,y_slice_pos,:]
+            ax.imshow(brain_slice, 'gray')
+            
+            try:
+                mask_slice = masks[i][:,y_slice_pos,:]
+                ax.imshow(mask_slice, 'jet', interpolation='none', alpha=0.7)
+            except:
+                pass
+            
+            try:
+                ax.set_title(titles[i])
+            except:
+                pass
+
+        camera.snap()
+        
+    return camera     
 
 
 
@@ -57,9 +90,12 @@ def trim(brain_tensor, mask_tensor, label_tensor):
     
     return brain_tensor_trim, mask_tensor_trim, label_tensor_trim
 
+
+
+
 def create_dicts(root_label,
                  root_data,
-                 root_geom_features,
+                 root_geom_features=None,
                  allowed_keys=None, 
                  USE_GEOM_FEATURES=False, 
                  GEOM_FEATURES=None):
@@ -99,7 +135,6 @@ def create_dicts(root_label,
 
 
 def normalized(brain_tensor):
-    
     return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
 
 def load(path_dict):
@@ -122,43 +157,13 @@ def load(path_dict):
     return [brain_tensor, mask_tensor, label_tensor]
 
 
-def show_slices(brain_tensor, n_slices_show=5, mask_tensor=None):
-    
-    fig, axes = plt.subplots(ncols=3, nrows=n_slices_show, figsize=(15,n_slices_show*5))
-    X_max, Y_max, Z_max = brain_tensor.shape
-    for i in range(n_slices_show):
-
-        x_slice_pos = (X_max//(n_slices_show+2))*(i+1)
-        y_slice_pos = (Y_max//(n_slices_show+2))*(i+1)
-        z_slice_pos = (Z_max//(n_slices_show+2))*(i+1)
-
-        brain_tensor_x_slice = brain_tensor[x_slice_pos,:,:]
-        brain_tensor_y_slice = brain_tensor[:,y_slice_pos,:]
-        brain_tensor_z_slice = brain_tensor[:,:,z_slice_pos]
-
-        axes[i,0].imshow(brain_tensor_x_slice, 'gray')
-        axes[i,1].imshow(brain_tensor_y_slice, 'gray')
-        axes[i,2].imshow(brain_tensor_z_slice, 'gray')
-        
-        if mask_tensor is not None:
-            
-            mask_tensor_x_slice = mask_tensor[x_slice_pos,:,:]
-            mask_tensor_y_slice = mask_tensor[:,y_slice_pos,:]
-            mask_tensor_z_slice = mask_tensor[:,:,z_slice_pos]
-
-            axes[i,0].imshow(mask_tensor_x_slice, 'jet', interpolation='none', alpha=0.7)
-            axes[i,1].imshow(mask_tensor_y_slice, 'jet', interpolation='none', alpha=0.7)
-            axes[i,2].imshow(mask_tensor_z_slice, 'jet', interpolation='none', alpha=0.7)
-
-    plt.tight_layout()
-    plt.show()
-
 
 # TODO: add check that FCD is not on boundary!
 def check_patch(x,y,z,
                 mask_tensor, 
                 label_tensor, 
-                pad):
+                pad,
+                p_thresh=None):
     
     x1,x2 = x-pad, x+pad
     y1,y2 = y-pad, y+pad
@@ -169,9 +174,12 @@ def check_patch(x,y,z,
 
     else:
         volume_mask= mask_tensor[x1:x2,y1:y2,z1:z2]
-        volume_label = label_tensor[x1:x2,y1:y2,z1:z2]
-
         p_mask = volume_mask.sum()/np.prod(volume_mask.shape)
+
+        if p_thresh is not None and p_mask < p_thresh:
+            return None
+
+        volume_label = label_tensor[x1:x2,y1:y2,z1:z2]
         n_label = volume_label.sum()
 
         patch_info = {'x':x,
@@ -181,12 +189,9 @@ def check_patch(x,y,z,
                       'n_label':n_label}
 
         return patch_info
+
     
-def get_symmetric_coordinate(r):
-    diff = a-a_sym
-    return a_sym - diff
-
-
+    
 def pad_arrays(arrays_list, padding_size):
     return [np.pad(array,((padding_size,padding_size),
                                 (padding_size,padding_size),

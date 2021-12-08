@@ -2,3 +2,4 @@
 logs
 __pycache__/
 *.npy
+logs_backup

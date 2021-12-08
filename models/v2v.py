@@ -4,12 +4,24 @@ from IPython.core.debugger import set_trace
 
 # from https://github.com/blufzzz/learnable-triangulation-pytorch/blob/master/mvn/models/v2v.py
 
+
+NORMALIZATION = 'batch_norm'
+
+def normalization(out_planes):
+    if NORMALIZATION == 'batch_norm':
+        return nn.BatchNorm3d(out_planes, affine=False)
+    elif NORMALIZATION == 'group_norm':
+        return nn.GroupNorm(16, out_planes)
+    else:
+        raise RuntimeError('Wrong NORMALIZATION')
+
+
 class Basic3DBlock(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size):
         super(Basic3DBlock, self).__init__()
         self.block = nn.Sequential(
             nn.Conv3d(in_planes, out_planes, kernel_size=kernel_size, stride=1, padding=((kernel_size-1)//2)),
-            nn.BatchNorm3d(out_planes),
+            normalization(out_planes),
             nn.ReLU(True)
         )
 
@@ -22,10 +34,10 @@ class Res3DBlock(nn.Module):
         super(Res3DBlock, self).__init__()
         self.res_branch = nn.Sequential(
             nn.Conv3d(in_planes, out_planes, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(out_planes),
+            normalization(out_planes),
             nn.ReLU(True),
             nn.Conv3d(out_planes, out_planes, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(out_planes)
+            normalization(out_planes)
         )
 
         if in_planes == out_planes:
@@ -33,7 +45,7 @@ class Res3DBlock(nn.Module):
         else:
             self.skip_con = nn.Sequential(
                 nn.Conv3d(in_planes, out_planes, kernel_size=1, stride=1, padding=0),
-                nn.BatchNorm3d(out_planes)
+                normalization(out_planes)
             )
 
     def forward(self, x):
@@ -58,7 +70,7 @@ class Upsample3DBlock(nn.Module):
         assert(stride == 2)
         self.block = nn.Sequential(
             nn.ConvTranspose3d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=0, output_padding=0),
-            nn.BatchNorm3d(out_planes),
+            normalization(out_planes),
             nn.ReLU(True)
         )
 
@@ -144,13 +156,16 @@ class V2VModel(nn.Module):
 
         self.sigmoid = config.model.sigmoid
         # geom features
-        input_channels = len(config.dataset.features) if hasattr(config.dataset,'features') else 0
-        input_channels += 1 # MRI brain itself
+        input_channels = 1 # MRI brain itself
+        if config.dataset.use_features:
+            input_channels += len(config.dataset.features) if hasattr(config.dataset,'features') else 0
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
 
+        global NORMALIZATION
+        NORMALIZATION = config.model.normalization if hasattr(config.model,'normalization') else 'batch_norm'
+
         self.front_layers = nn.Sequential(
-            nn.BatchNorm3d(input_channels), 
             Basic3DBlock(input_channels, 16, 7),
             Res3DBlock(16, 32),
             Res3DBlock(32, 32),

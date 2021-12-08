@@ -5,18 +5,18 @@ make_logs: true
 silent: false
 
 opt:
-  device: 1
-  criterion: "BCE" 
-  task: "segmentation"
-  prob_threshold: 0.5
+  device: 0
+  criterion: "Dice" 
  
   start_epoch: 0
   n_epochs: 9999
 
+  augmentation: true
+
   train_batch_size: 1
   val_batch_size: 1
 
-  lr: 0.0005
+  lr: 0.0001 # default - 0.0001 
 
   save_model: true
 
@@ -25,13 +25,16 @@ model:
   output_channels: 1 # FCD and background
   max_channel_encoder_decoder: 32
   sigmoid: true
+  normalization: 'group_norm'
 
 dataset:
   use_features: true
-  trim_background: true
+  trim_background: true  
   features: ['thickness', 'sulc', 'curv']
   root: '../fcd_data/normalized_tensors' 
   # root: '../fcd_data/patches_dataset_64_features'
+  # root: '../fcd_data/data_only_usefull_areas/full/' 
   dataset_type: 'interpolated'
+  # dataset_type: 'interpolated_npy'
   # dataset_type: 'patches'
-  patch_size: 64
+  # patch_size: 64
