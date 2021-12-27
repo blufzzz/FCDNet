@@ -17,14 +17,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.parallel import DistributedDataParallel
-from utils import trim, normalized
+from utils import trim, normalize
 from sklearn.metrics import accuracy_score, roc_auc_score
 from models.v2v import V2VModel
 import torchio as tio
-
+from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
-
 from losses import focal_tversky_loss
 
 
@@ -44,8 +43,8 @@ def DiceScoreBinary(input,
                     weights=None):
     '''
     Binary Dice score
-    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
     input - [bs,1,ps,ps,ps], probability [0,1]
+    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
     '''
 
     # create "background" class
@@ -80,118 +79,6 @@ def DiceLossBinary(*args, **kwargs):
 
 
 
-class CatBrainMaskLoader_npy(Dataset):
-
-    def __init__(self, config, train=True):
-        raise RuntimeError
-
-    def __init__(self, config, train=True):
-
-        self.root = config.root
-        self.train = train
-        self.trim_background = config.trim_background
-
-        self.metadata = np.load('metadata.npy',allow_pickle=True).item()
-        metadata_key = 'train' if self.train else 'test'
-        self.labels = self.metadata[metadata_key]
-
-        for label in self.labels:
-            if not os.path.isfile(os.path.join(self.root, 'labels', f'{label}.npy')):
-                self.labels.remove(label)
-                print(f'LABEL: {label} removed!')
-
-        self.paths_brains = [os.path.join(self.root, 't1_brains', f'{k}.npy') for k in self.labels]
-        self.paths_labels = [os.path.join(self.root, 'labels', f'{k}.npy') for k in self.labels]
-
-    def trim_npy(self, brain_tensor, label_tensor):
-    
-        '''
-        mask_tensor - [H,W,D]
-        brain_tensor - [H,W,D]
-        label_tensor - [H,W,D]
-        
-        '''
-        X,Y,Z = brain_tensor.shape
-        
-        background = brain_tensor[0,0,0]
-        brain_tensor_ = brain_tensor != background 
-        
-        x1,x2 = np.arange(X)[np.sum(brain_tensor_, axis=(1,2)) > 0][[0,-1]]
-        y1,y2 = np.arange(Y)[np.sum(brain_tensor_,axis=(0,2)) > 0][[0,-1]]
-        z1,z2 = np.arange(Z)[np.sum(brain_tensor_,axis=(0,1)) > 0][[0,-1]]
-        
-        brain_tensor_trim = brain_tensor[x1:x2][:,y1:y2][:,:,z1:z2]
-        label_tensor_trim = label_tensor[x1:x2][:,y1:y2][:,:,z1:z2]
-        
-        return brain_tensor_trim, label_tensor_trim
-
-    def __getitem__(self, idx):
-
-
-        brain = np.load(self.paths_brains[idx])
-        background = brain[0,0,0]
-        mask = brain != background
-        brain[mask] = normalized(brain[mask])
-        label = np.load(self.paths_labels[idx])
-
-        if self.trim_background:
-            brain, label = self.trim_npy(brain, label)
-
-        brain_tensor_torch = torch.tensor(brain,  dtype=torch.float32)
-        label_tensor_torch = torch.tensor(label,  dtype=torch.float32)
-
-        return brain_tensor_torch.unsqueeze(0), label_tensor_torch.unsqueeze(0)
-
-    def __len__(self):
-        return len(self.labels)
-
-
-
-
-class CatBrainMaskLoader(Dataset):
-
-    def __init__(self, config, train=True):
-        raise RuntimeError
-
-    def __init__(self, config, train=True):
-        self.root = config.root
-        self.train = train
-        self.trim_background = config.trim_background
-
-        self.metadata = np.load('metadata.npy',allow_pickle=True).item()
-        metadata_key = 'train' if self.train else 'test'
-        self.labels = self.metadata[metadata_key]
-
-        self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]
-        self.use_features = config.use_features
-        self.features = config.features if hasattr(config, 'features') else None
-
-    def __getitem__(self, idx):
-
-        tensor_dict = torch.load(self.paths[idx])
-        brain_tensor_torch = tensor_dict['brain']
-        mask_tensor_torch = tensor_dict['mask']
-        label_tensor_torch = tensor_dict['label']
-
-        if self.use_features:
-            assert self.features is not None
-            brain_tensor_torch = torch.stack([brain_tensor_torch] + \
-                                            [tensor_dict[f] for f in self.features],
-                                            dim=0)
-        else:
-            brain_tensor_torch = brain_tensor_torch.unsqueeze(0)
-
-        if self.trim_background:
-            brain_tensor_torch, mask_tensor_torch, label_tensor_torch = trim(brain_tensor_torch, 
-                                                                                mask_tensor_torch, 
-                                                                                label_tensor_torch)
-
-        return brain_tensor_torch, label_tensor_torch.unsqueeze(0)
-
-    def __len__(self):
-        return len(self.paths)
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -199,25 +86,6 @@ def parse_args():
     parser.add_argument('--experiment_comment', default='', type=str)
     args = parser.parse_args()
     return args
-
-
-def create_datesets(config):
-
-    if config.dataset.dataset_type == 'interpolated': 
-        train_dataset = CatBrainMaskLoader(config.dataset, train=True)
-        val_dataset = CatBrainMaskLoader(config.dataset, train=False)
-    elif config.dataset.dataset_type == 'patches':
-        train_dataset = CatBrainMaskPatchLoader(config.dataset, train=True)
-        val_dataset = CatBrainMaskPatchLoader(config.dataset, train=False)
-
-    elif config.dataset.dataset_type == 'interpolated_npy':
-        train_dataset = CatBrainMaskLoader_npy(config.dataset, train=True)
-        val_dataset = CatBrainMaskLoader_npy(config.dataset, train=False)
-
-    else:
-        raise RuntimeError('Wrond `dataset_type`!')
-
-    return train_dataset, val_dataset
 
 
 def one_epoch(model, 
@@ -243,8 +111,6 @@ def one_epoch(model,
 
         for iter_i, (brain_tensor, label_tensor) in iterator:
             
-            # set_trace()
-
             if (augmentation is not None) and is_train:
                 assert config.opt.train_batch_size == 1
 
@@ -258,8 +124,6 @@ def one_epoch(model,
                 brain_tensor = transformed['t1'].tensor.unsqueeze(0)
                 label_tensor = transformed['label'].tensor.unsqueeze(0)
 
-                # set_trace()
-
             if config.interpolate:
                 brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
                 label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device) # unsqueeze channel
@@ -267,9 +131,11 @@ def one_epoch(model,
                 brain_tensor = brain_tensor.to(device)
                 label_tensor = label_tensor.to(device)
 
+            # set_trace()
             # forward pass
-            label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
-            
+            # label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
+            label_tensor_predicted = model(label_tensor) # [bs,1,ps,ps,ps]
+
             # set_trace()
             loss = criterion(label_tensor_predicted, label_tensor)
 
@@ -338,14 +204,20 @@ def main(args):
     model = V2VModel(config).to(device)
     print('Model created!')
 
+    if hasattr(config.model, 'weights'):
+        model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
+        print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
+        model.load_state_dict(model_dict['model_state'])
+
     # setting datasets
-    train_dataset, val_dataset = create_datesets(config)
+    train_dataset, val_dataset = create_datasets(config)
+
     train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
     print(len(train_dataloader), len(val_dataloader))
 
 
-    # if 
+    transform = None
     if config.opt.augmentation:
         symmetry = tio.RandomFlip(axes=0)
         bias = tio.RandomBiasField(coefficients=0.3)

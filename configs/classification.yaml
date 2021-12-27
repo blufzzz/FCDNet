@@ -1,0 +1,36 @@
+make_logs: true
+
+opt:
+  device: 2
+  criterion: "BCE" 
+ 
+  start_epoch: 0
+  n_epochs: 9999
+
+  augmentation: false
+
+  train_batch_size: 1
+  val_batch_size: 1
+
+  lr: 0.001 # default - 0.0001 
+  save_model: true
+
+
+model:
+  classification_threshold : 0.5
+
+dataset:
+  use_features: true
+  trim_background: true  
+  features: ['thickness', 'sulc', 'curv']
+  root: '../fcd_data/normalized_tensors'
+  dataset_type: 'patches' 
+  patch_size : 32
+  
+  queue_length : 200
+  samples_per_volume : 50
+  patch_batch_size : 10
+
+  negative_sampling_prob : 0.001
+  patch_fcd_threshold: 0.5
+  

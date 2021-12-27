@@ -11,7 +11,7 @@ import nibabel
 
 
 def video(brain_tensor, mask_tensor=None, n_slides=100):
-    
+
     '''
     brain_tensor - single ndarray brain [H,W,D]
     '''
@@ -31,8 +31,9 @@ def video(brain_tensor, mask_tensor=None, n_slides=100):
         
         camera.snap()
         
-    return camera   
     
+    return camera   
+         
 
 def video_comparison(brains, masks=None, titles=None, n_slides=64):
     
@@ -71,24 +72,43 @@ def video_comparison(brains, masks=None, titles=None, n_slides=64):
 
 
 
-def trim(brain_tensor, mask_tensor, label_tensor):
+
+def trim(brain_tensor, label_tensor, mask_tensor=None):
+
     '''
     mask_tensor - [H,W,D]
     brain_tensor - [N_features, H,W,D]
     label_tensor - [H,W,D]
     
     '''
-    X,Y,Z = mask_tensor.shape
+    X,Y,Z = label_tensor.shape
     
-    X_mask = mask_tensor.sum(dim=[1,2]) > 0
-    Y_mask = mask_tensor.sum(dim=[0,2]) > 0
-    Z_mask = mask_tensor.sum(dim=[0,1]) > 0
+    if mask_tensor is not None:
+        X_mask = mask_tensor.sum(dim=[1,2]) > 0
+        Y_mask = mask_tensor.sum(dim=[0,2]) > 0
+        Z_mask = mask_tensor.sum(dim=[0,1]) > 0
+
+        brain_tensor_trim = brain_tensor[:,X_mask][:,:,Y_mask][:,:,:,Z_mask]
+        label_tensor_trim = label_tensor[X_mask][:,Y_mask][:,:,Z_mask]
+        mask_tensor_trim = mask_tensor[X_mask][:,Y_mask][:,:,Z_mask]   
+
+    else:
+        background = 0
+        assert (brain_tensor[:,0,0,0] == background).all()
+        mask_tensor = (brain_tensor != background).sum(0)
+        X_mask = mask_tensor.sum(dim=[1,2]) > 0
+        Y_mask = mask_tensor.sum(dim=[0,2]) > 0
+        Z_mask = mask_tensor.sum(dim=[0,1]) > 0
+
+        x1,x2 = np.arange(X)[mask_tensor.sum(dim=[1,2]) > 0][[0,-1]]
+        y1,y2 = np.arange(Y)[mask_tensor.sum(dim=[0,2]) > 0][[0,-1]]
+        z1,z2 = np.arange(Z)[mask_tensor.sum(dim=[0,1]) > 0][[0,-1]]
     
-    brain_tensor_trim = brain_tensor[:,X_mask][:,:,Y_mask][:,:,:,Z_mask]
-    mask_tensor_trim = mask_tensor[X_mask][:,Y_mask][:,:,Z_mask]    
-    label_tensor_trim = label_tensor[X_mask][:,Y_mask][:,:,Z_mask]
-    
-    return brain_tensor_trim, mask_tensor_trim, label_tensor_trim
+        brain_tensor_trim = brain_tensor[:,x1:x2][:,:,y1:y2][:,:,:,z1:z2]
+        label_tensor_trim = label_tensor[x1:x2][:,y1:y2][:,:,z1:z2]
+        mask_tensor_trim = mask_tensor[x1:x2][:,y1:y2][:,:,z1:z2]   
+
+    return brain_tensor_trim, label_tensor_trim, mask_tensor_trim
 
 
 
@@ -96,7 +116,7 @@ def trim(brain_tensor, mask_tensor, label_tensor):
 def create_dicts(root_label,
                  root_data,
                  root_geom_features=None,
-                 allowed_keys=None, 
+                 allowed_keys=None,
                  USE_GEOM_FEATURES=False, 
                  GEOM_FEATURES=None):
     
@@ -108,12 +128,9 @@ def create_dicts(root_label,
     for label in keys:
 
         sub_root = os.path.join(root_data, f'sub-{label}/anat/')
-            
         brain_path = glob.glob(os.path.join(sub_root, '*Asym_desc-preproc_T1w.nii.gz'))[0]
         mask_path = glob.glob(os.path.join(sub_root, '*Asym_desc-brain_mask.nii.gz'))[0]
         label_path = os.path.join(root_label, label + '.nii')   
-
-        # features
 
         if USE_GEOM_FEATURES:
             try:
@@ -133,11 +150,21 @@ def create_dicts(root_label,
     return paths_dict
 
 
-
-def normalized(brain_tensor):
+def normalize_(brain_tensor):
     return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
 
+def normalize(brain_tensor):
+    background = brain_tensor[0,0,0]
+    brain_tensor = brain_tensor - background # make background-level pixel to be zero
+    mask = brain_tensor != background
+    brain_tensor[mask] = normalize_(brain_tensor[mask])
+    return brain_tensor
+
 def load(path_dict):
+    
+    '''
+    returns [brain_tensor, mask_tensor, label_tensor]
+    '''
 
     mask_tensor = nibabel.load(path_dict['mask']).get_fdata() > 0
     mask_tensor_int = mask_tensor.astype(int) 
