@@ -82,10 +82,12 @@ class EncoderDecorder(nn.Module):
     def __init__(self, max_channel=128):
         super().__init__()
 
+        intermediate_channel = max(max_channel//2, 32)
+
         self.encoder_pool1 = Pool3DBlock(2)
-        self.encoder_res1 = Res3DBlock(32, max_channel//2)
+        self.encoder_res1 = Res3DBlock(32, intermediate_channel)
         self.encoder_pool2 = Pool3DBlock(2)
-        self.encoder_res2 = Res3DBlock(max_channel//2, max_channel)
+        self.encoder_res2 = Res3DBlock(intermediate_channel, max_channel)
         self.encoder_pool3 = Pool3DBlock(2)
         self.encoder_res3 = Res3DBlock(max_channel, max_channel)
         self.encoder_pool4 = Pool3DBlock(2)
@@ -102,12 +104,12 @@ class EncoderDecorder(nn.Module):
         self.decoder_res3 = Res3DBlock(max_channel, max_channel)
         self.decoder_upsample3 = Upsample3DBlock(max_channel, max_channel, 2, 2)
         self.decoder_res2 = Res3DBlock(max_channel, max_channel)
-        self.decoder_upsample2 = Upsample3DBlock(max_channel, max_channel//2, 2, 2)
-        self.decoder_res1 = Res3DBlock(max_channel//2, max_channel//2)
-        self.decoder_upsample1 = Upsample3DBlock(max_channel//2, 32, 2, 2)
+        self.decoder_upsample2 = Upsample3DBlock(max_channel, intermediate_channel, 2, 2)
+        self.decoder_res1 = Res3DBlock(intermediate_channel, intermediate_channel)
+        self.decoder_upsample1 = Upsample3DBlock(intermediate_channel, 32, 2, 2)
 
         self.skip_res1 = Res3DBlock(32, 32)
-        self.skip_res2 = Res3DBlock(max_channel//2, max_channel//2)
+        self.skip_res2 = Res3DBlock(intermediate_channel, intermediate_channel)
         self.skip_res3 = Res3DBlock(max_channel, max_channel)
         self.skip_res4 = Res3DBlock(max_channel, max_channel)
         self.skip_res5 = Res3DBlock(max_channel, max_channel)
@@ -156,9 +158,7 @@ class V2VModel(nn.Module):
 
         self.sigmoid = config.model.sigmoid
         # geom features
-        input_channels = 1 # MRI brain itself
-        if config.dataset.use_features:
-            input_channels += len(config.dataset.features) if hasattr(config.dataset,'features') else 0
+        input_channels = 10 if config.dataset.features == 'ALL' else len(config.dataset.features)
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
 
@@ -210,29 +210,4 @@ class V2VModel(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
 
-
-
-class ResNet3D(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-    def forward(self, x):
-
-        pass
-
-        # self.sigmoid = config.model.sigmoid
-        # input_channels = config.model.input_channels
-        # max_channel = config.model.max_channel_encoder_decoder
-
-        # self.front_layers = nn.Sequential(
-        #     Basic3DBlock(input_channels, 16, 7),
-        #     Res3DBlock(16, 32),
-        #     Res3DBlock(32, 32),
-        #     Res3DBlock(32, 32)
-        # )
-
-        # self.encoder
-
-        # self.encoder_decoder = EncoderDecorder(max_channel)
 

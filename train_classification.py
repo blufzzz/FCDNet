@@ -27,14 +27,47 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchio as tio
 
-from utils import check_patch, pad_arrays, normalize, load, create_dicts, trim, video, video_comparison
+from utils import get_capacity, normalize_, save, DiceScoreBinary, DiceLossBinary, parse_args
 from IPython.core.display import display, HTML
-from train import DiceScoreBinary, parse_args, save
+from train import DiceScoreBinary, parse_args, 
 
 from multiprocessing import cpu_count
 N_CPU = cpu_count()
 SEED = 42
 
+
+# import logging
+# logging.basicConfig(filename='/media/tom/ibulygin/FCDNet/error_logs',level=logging.DEBUG)
+
+
+# def collate_fn(batch_list):
+#     '''
+#     batch_list: [(brain, mask, label),...,(brain, mask, label)]
+#     '''
+#     set_trace()
+#     if len(batch_list) == 1: 
+
+#         set_trace()
+
+#         brains = [b[0] for b in batch_list]
+#         masks = [b[1] for b in batch_list]
+#         labels = [b[2] for b in batch_list]
+
+#         brains = torch.stack(brains, dim=0)
+#         masks = torch.stack(masks, dim=0)
+#         labels = torch.stack(labels, dim=0)
+
+#     # may be different sizes!
+#     else:
+
+#         # find minimal shape
+#         shape = torch.tensor([[*b[0].shape[1:]] for b in batch_list]).min(0)[0]
+
+#         brains = [F.interpolate(b[0].unsqueeze(0), shape).squeeze(0) for b in batch_list]
+#         masks = [F.interpolate(b[1].unsqueeze(0), shape).squeeze(0) for b in batch_list]
+#         labels = [F.interpolate(b[2].unsqueeze(0), shape).squeeze(0) for b in batch_list]
+
+#     return brains, masks, labels
 
 def one_epoch(model, 
                 criterion, 
@@ -49,42 +82,78 @@ def one_epoch(model,
                 augmentation=None, 
                 is_train=True):
 
+
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
     metric_dict = defaultdict(list)
     patch_size = config.dataset.patch_size
     patch_batch_size = config.dataset.patch_batch_size
-    queue_length = config.dataset.queue_length
+    batch_size = config.opt.train_batch_size if is_train else config.opt.val_batch_size
     samples_per_volume = config.dataset.samples_per_volume
-    negative_sampling_prob = config.dataset.negative_sampling_prob
+    queue_length = batch_size*samples_per_volume
     classification_threshold = config.model.classification_threshold
+    sampler_type = config.dataset.sampler_type
+    patch_fcd_threshold = config.dataset.patch_fcd_threshold 
+    labels = dataloader.dataset.labels
+    shuffle_train = config.dataset.shuffle_train if hasattr(config.dataset,'shuffle_train') else True
+    top_k_list = config.dataset.top_k_list if hasattr(config.dataset, 'top_k_list') else [10, 50, 100]
+    assert isinstance(top_k_list, list)
 
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
     with grad_context():
         iterator = enumerate(dataloader)
 
-        for iter_i, (brain_tensor, label_tensor) in iterator:
-            
+        # brain_tensor - [bs,C,H,W,D]
+        # mask_tensor - [bs,1,H,W,D]
+        # label_tensor - [bs,1,H,W,D]
+        for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
 
-            #####################
-            # SETUP DATALOADERS #
-            #####################
-            # brain_tensor - [1,C,H,W,D]
-            # label_tensor - [1,1,H,W,D]
-            sampling_map = label_tensor[0].clone() # leave only channel dim
-            sampling_map[sampling_map == 0] = negative_sampling_prob
-            subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
-                                  label=tio.LabelMap(tensor=label_tensor[0]),
-                                  sampling_map=sampling_map)
-
+            ###########################
+            # SETUP PATCH DATALOADERS #
+            ###########################
             if is_train:
-                if augmentation is not None:
-                    subject = augmentation(subject)
+                batch_size = len(brain_tensor)
 
-                subjects_dataset = tio.SubjectsDataset([subject])
-                sampler = tio.data.WeightedSampler(patch_size, 'sampling_map')
-                
+                label = labels[iter_i] if shuffle_train and batch_size==1 else iter_i
+                # from batch to list of subjects
+                subjects_list = []
+                for batch_index in range(batch_size):
+
+                    n_fcd = label_tensor[batch_index].sum()
+                    if sampler_type == 'weights': 
+                        
+                        n_brain = mask_tensor[batch_index].sum()
+                        k = n_brain / n_fcd
+                        sampling_map = mask_tensor[batch_index].clone()
+                        sampling_map[label_tensor[batch_index].type(torch.bool)] = 2*int(k)
+                        sampler = tio.data.WeightedSampler(patch_size, 'sampling_map')
+
+                    elif sampler_type == 'labels':
+
+                        sampling_map = mask_tensor[batch_index].clone()
+                        sampling_map[label_tensor[batch_index].type(torch.bool)] = 2
+
+                        sampler = tio.data.LabelSampler(
+                                                        patch_size=patch_size,
+                                                        label_name='sampling_map',
+                                                        label_probabilities={0:0,1:1,2:1},
+                                                        )
+                    else:
+                        raise RuntimeError('Unknown sampler_type!')
+
+                    subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[batch_index]),
+                                          label=tio.LabelMap(tensor=label_tensor[batch_index]),
+                                          sampling_map=sampling_map,
+                                          n_fcd=n_fcd)
+
+                    if augmentation is not None:
+                        subject = augmentation(subject)
+
+                    subjects_list.append(subject)
+
+                subjects_dataset = tio.SubjectsDataset(subjects_list)
+                                                            
                 patches_queue = tio.Queue(
                     subjects_dataset,
                     queue_length,
@@ -96,42 +165,52 @@ def one_epoch(model,
                 patch_loader = DataLoader(
                     patches_queue,
                     batch_size=patch_batch_size,
-                    num_workers=1,  # this must be 0
+                    num_workers=0,  # this must be 0
                 )
 
             else:
-                patch_overlap = patch_size//2 
+                label = labels[iter_i]
+
+                assert brain_tensor.shape[0] == 1
+                n_fcd = label_tensor.sum()
+                subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
+                                      label=tio.LabelMap(tensor=label_tensor[0]),
+                                      n_fcd=n_fcd)
+
+                patch_overlap = patch_size-4 #patch_size//2 
                 grid_sampler = tio.inference.GridSampler(
                     subject, # validation subject
                     patch_size,
-                    patch_overlap,
+                    patch_overlap
                 )
 
                 patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
                 aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
-                # aggregator_topk = tio.inference.GridAggregator(grid_sampler)
 
             ########################
             # ITERATE OVER PATCHES #
             #############################################################################
-            N_fcd = label_tensor.sum() # number of FCD pixels in target
             # number of FCD pixels in patch to be considered as FCD patch
-            PATCH_FCD_THRESHOLD = config.dataset.patch_fcd_threshold 
             metric_dict_patch = defaultdict(list)
-            for patches_batch in patch_loader:
+            n_calculated = 0
+            prob_fcd = []
+            for patch_i, patches_batch in enumerate(patch_loader):
                 
                 inputs = patches_batch['t1'][tio.DATA].to(device)  # [bs,C,p,p,p]
                 targets = patches_batch['label'][tio.DATA].to(device) # [bs,1,p,p,p]
-
-                # set_trace()
-
-                logits = model(inputs)
-
-                # set_trace()
+                n_fcd = patches_batch['n_fcd'].to(device).unsqueeze(1)
                 
-                targets_ = targets.sum([-1,-2,-3]) / N_fcd > PATCH_FCD_THRESHOLD
+                targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
                 targets_ = targets_.type(torch.float32)
 
+                balance = targets_.sum() / len(targets_)
+
+                if is_train and (balance < 0.1 or balance==1):
+                    continue
+                else:
+                    n_calculated += 1
+
+                logits = model(inputs)
                 loss = criterion(logits, targets_) # [bs,1], [bs,1]
                 
                 if is_train:
@@ -140,52 +219,86 @@ def one_epoch(model,
                     opt.step()
                 else:
                     locations = patches_batch[tio.LOCATION]
-                    outputs = torch.ones_like(targets)*torch.sigmoid(logits)[...,None,None,None] # [bs,1,p,p,p]
+                    outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
                     aggregator.add_batch(outputs, locations)
 
                 #####################
                 # per-PATCH METRICS #
                 #####################
                 # map to and remove last dim
-                logits_prob_np = torch.sigmoid(logits.squeeze(-1)).detach().cpu().numpy()
-                targets_np = targets_.squeeze(-1).detach().cpu().numpy().astype(int)
+                prob_pred_np = torch.sigmoid(logits.squeeze(-1)).detach().cpu().numpy() # [bs,]
+                targets_np = targets_.squeeze(-1).detach().cpu().numpy().astype(int) # [bs,]
 
-                targets_pred_np = (logits_prob_np > classification_threshold).astype(int)
-                # precision = precision_score(targets_np, targets_pred_np, zero_division=0)
-                # recall = recall_score(targets_np, targets_pred_np, zero_division=0)
+                targets_pred_np = (prob_pred_np > classification_threshold).astype(int)
+                
                 accuracy = accuracy_score(targets_np, targets_pred_np)
-
-                # metric_dict_patch['precision'].append(precision)
-                # metric_dict_patch['recall'].append(recall)
                 metric_dict_patch['accuracy'].append(accuracy)
+
                 metric_dict_patch[f'{loss_name}'].append(loss.item())
 
+                if not is_train:
+                    prob_fcd.append(np.stack([prob_pred_np, targets_np], axis=-1))
+            
             ##############################################################################
-
+            n_patches = len(patch_loader)
+            print(f'Calculated for index {label}: {n_calculated} from {n_patches}')
             for k,v in metric_dict_patch.items():
-                metric_dict[k].append(np.mean(v))
+                if n_calculated > 0:
+                    metric_dict[k].append(np.mean(v))
 
             if not is_train:
-                
+                prob_fcd = np.concatenate(prob_fcd, axis=0)
+
+                prob_pred_all = prob_fcd[:,0]
+                targets_pred_all = (prob_pred_all > classification_threshold).astype(int)
+                targets_all = prob_fcd[:,1]
+
+                precision = precision_score(targets_all, targets_pred_all, zero_division=0)
+                recall = recall_score(targets_all, targets_pred_all, zero_division=0)
+                roc_auc = roc_auc_score(targets_all, prob_pred_all)
+
+                # accuracy = accuracy_score(targets_all, targets_pred_all)
+                # metric_dict['accuracy'].append(accuracy)
+
+                metric_dict['precision'].append(precision)
+                metric_dict['recall'].append(recall)
+                metric_dict['roc_auc'].append(roc_auc)
+
+                # sorting by predicted probabilities
+                argsort = np.argsort(prob_fcd[:,0], axis=0)[::-1]
+                fcd_sorted = prob_fcd[argsort][:,1]
+                for top_k in top_k_list:
+                    top_k_fcd = fcd_sorted[:top_k]
+                    hitrate = top_k_fcd.mean() #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
+                    metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
+
                 output_tensor = aggregator.get_output_tensor().unsqueeze(1) # [1,1,H,W,D]
-                # output_tensor = output_tensor / output_tensor.max()
-                # set_trace()
-                dice = DiceScoreBinary(output_tensor, label_tensor).item()  
+                output_tensor = output_tensor * mask_tensor # zeros all non mask values
+                dice = DiceScoreBinary(output_tensor, label_tensor).item()
+                coverage = (output_tensor*label_tensor).sum() / label_tensor.sum()
                 metric_dict['dice_score'].append(dice)
+                metric_dict['coverage'].append(coverage.item())
+
+                print(f'Dice: {dice} for val {label}')
+
+                # set_trace()
+
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
-                    writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
+                    if n_calculated > 0:
+                        writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
             
             # set_trace()
             ############
             # PRINTING #
             ############
-            loss_mean = metric_dict[f'{loss_name}'][-1]
-            message = f'Epoch:{epoch}, iter:{iter_i}, loss-{loss_name}:{loss_mean}'
-            if not is_train:
-                message += f', DICE:{dice}'
-            print(message)
+            if n_calculated > 0:
+                loss_mean = metric_dict[f'{loss_name}'][-1]
+                message = f'Epoch:{epoch}, iter:{iter_i}, loss-{loss_name}:{loss_mean}'
+                if not is_train:
+                    message += f', DICE:{dice}'
+                print(message)
 
             n_iters_total += 1
 
@@ -217,7 +330,7 @@ def main(args):
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
-    assert config.opt.train_batch_size == 1 and config.opt.val_batch_size == 1
+    assert config.opt.val_batch_size == 1
 
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
@@ -235,9 +348,14 @@ def main(args):
     ################
     model = torchvision.models.video.r2plus1d_18(pretrained=False, progress=False) 
     conv3d_1 = model.stem[0]
-    input_channels = 1 # MRI brain itself
-    if config.dataset.use_features:
-        input_channels += len(config.dataset.features) if hasattr(config.dataset,'features') else 0
+    
+    # features
+    if config.dataset.features == 'ALL':
+        input_channels = 10
+    else:
+        assert isinstance(config.dataset.features, list)
+        input_channels = len(config.dataset.features)
+
     model.stem[0] = nn.Conv3d(in_channels=input_channels,
                              out_channels=conv3d_1.out_channels,
                              kernel_size=conv3d_1.kernel_size,
@@ -245,7 +363,8 @@ def main(args):
                              bias=conv3d_1.bias)
     model.fc = nn.Linear(model.fc.in_features, 1)
     model = model.to(device)
-    print('Model created!')
+    model_capacity = get_capacity(model)
+    print(f'Model created! Capacity: {model_capacity}')
 
     if hasattr(config.model, 'weights'):
         model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
@@ -256,9 +375,18 @@ def main(args):
     # CREATE DATASETS #
     ###################
     train_dataset, val_dataset = create_datasets(config)
+    collate_fn = None
+    shuffle_train = config.dataset.shuffle_train if hasattr(config.dataset,'shuffle_train') else True
+    train_dataloader = DataLoader(train_dataset,
+                                    batch_size=config.opt.train_batch_size,
+                                    shuffle=shuffle_train,
+                                    collate_fn=collate_fn)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
+    val_dataloader = DataLoader(val_dataset,
+                                batch_size=config.opt.val_batch_size,
+                                shuffle=False,
+                                collate_fn=collate_fn)
+
     print(len(train_dataloader), len(val_dataloader))
 
     augmentation = None
@@ -292,7 +420,6 @@ def main(args):
     n_iters_total_val = 0
     target_metric = 0
     target_metric_prev = -1
-    epoch_to_save = 0
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
             print (f'TRAIN EPOCH: {epoch} ... ')
@@ -308,7 +435,6 @@ def main(args):
                                             n_iters_total_train,
                                             augmentation=augmentation,
                                             is_train=True)
-
             print (f'VAL EPOCH: {epoch} ... ')
             n_iters_total_val, target_metric = one_epoch(model, 
                                                 criterion, 
@@ -328,7 +454,8 @@ def main(args):
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
 
-    except:
+    except Exception as e:
+        set_trace()
         # keyboard interrupt
         if MAKE_LOGS:
             np.save(os.path.join(experiment_dir, 'metric_dict_epoch'), metric_dict_epoch)
@@ -336,3 +463,4 @@ def main(args):
 if __name__ == '__main__':
     args = parse_args()
     main(args)
+    

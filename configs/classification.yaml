@@ -1,13 +1,13 @@
 make_logs: true
 
 opt:
-  device: 2
-  criterion: "BCE" 
+  device: 1
+  criterion: "BCE"  
  
   start_epoch: 0
   n_epochs: 9999
 
-  augmentation: false
+  augmentation: true
 
   train_batch_size: 1
   val_batch_size: 1
@@ -20,17 +20,17 @@ model:
   classification_threshold : 0.5
 
 dataset:
-  use_features: true
   trim_background: true  
-  features: ['thickness', 'sulc', 'curv']
-  root: '../fcd_data/normalized_tensors'
-  dataset_type: 'patches' 
-  patch_size : 32
-  
-  queue_length : 200
-  samples_per_volume : 50
-  patch_batch_size : 10
-
-  negative_sampling_prob : 0.001
-  patch_fcd_threshold: 0.5
+  features: 'ALL' #'ALL'
+  root: '/nfs/garfield/ibulygin/tensors_v2'
+  metadata_path: '/nfs/garfield/ibulygin/metadata_v2.npy'
+  # root: '../fcd_data/normalized_tensors'
+  dataset_type: 'patches'
+  sampler_type: 'labels' #'weights' 
+  patch_size : 64
+  shuffle_train: false
+  samples_per_volume : 500
+  patch_batch_size : 2
+  top_k_list: [10, 50, 100]
+  patch_fcd_threshold: 0.8
   

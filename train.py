@@ -3,7 +3,6 @@ from IPython.core.debugger import set_trace
 from datetime import datetime
 import os
 import shutil
-import argparse
 import time
 import json
 from collections import defaultdict
@@ -17,7 +16,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.parallel import DistributedDataParallel
-from utils import trim, normalize
+from utils import trim, normalize, save, DiceScoreBinary, DiceLossBinary, parse_args, get_capacity
 from sklearn.metrics import accuracy_score, roc_auc_score
 from models.v2v import V2VModel
 import torchio as tio
@@ -25,67 +24,6 @@ from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
 from losses import focal_tversky_loss
-
-
-def save(experiment_dir, model, opt, epoch):
-
-    checkpoint_dir = os.path.join(experiment_dir, "checkpoints") # , "{:04}".format(epoch)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    dict_to_save = {'model_state': model.state_dict(),'opt_state' : opt.state_dict(), 'epoch':epoch}
-
-    torch.save(dict_to_save, os.path.join(checkpoint_dir, "weights.pth"))
-
-
-def DiceScoreBinary(input, 
-                    target, 
-                    include_backgroud=False, 
-                    weights=None):
-    '''
-    Binary Dice score
-    input - [bs,1,ps,ps,ps], probability [0,1]
-    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
-    '''
-
-    # create "background" class
-    
-    if include_backgroud:
-        target_float = target.type(input.dtype)
-        background_tensor = torch.abs(target_float - 1.)
-        target_stacked = torch.cat([background_tensor, target_float], dim=1) # [bs,2,ps,ps,ps]
-        input_stacked = torch.cat([1-input, input], dim=1) # [bs,2,ps,ps,ps]
-        
-        intersection = torch.sum(input_stacked * target_stacked, dim=(2,3,4)) # [bs,2]
-        cardinality = torch.sum(torch.pow(input_stacked,2) + torch.pow(target_stacked,2), dim=(2,3,4)) # [bs,2]
-        dice_score = 2. * intersection / (cardinality + 1e-7) # [bs,2]
-        
-        if weights is not None:
-            dice_score = (dice_score*weights).sum(1)
-        
-    else:
-
-        target = target.squeeze(1) # cast to float and squeeze channel # .type(input.dtype)
-        input = input.squeeze(1) # squeeze channel
-        
-        intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
-        cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
-        dice_score = 2. * intersection / (cardinality + 1e-7)
-
-    return dice_score.mean()
-
-
-def DiceLossBinary(*args, **kwargs):
-    return 1 - DiceScoreBinary(*args, **kwargs)
-
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--logdir", type=str, default="")
-    parser.add_argument('--experiment_comment', default='', type=str)
-    args = parser.parse_args()
-    return args
 
 
 def one_epoch(model, 
@@ -109,34 +47,33 @@ def one_epoch(model,
     with grad_context():
         iterator = enumerate(dataloader)
 
-        for iter_i, (brain_tensor, label_tensor) in iterator:
+        for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
             
             if (augmentation is not None) and is_train:
-                assert config.opt.train_batch_size == 1
-
                 subject = tio.Subject(
                     t1=tio.ScalarImage(tensor=brain_tensor[0]),
                     label=tio.LabelMap(tensor=label_tensor[0]),
+                    mask=tio.LabelMap(tensor=mask_tensor[0]),
                     diagnosis='positive'
                 )
 
                 transformed = augmentation(subject)
                 brain_tensor = transformed['t1'].tensor.unsqueeze(0)
                 label_tensor = transformed['label'].tensor.unsqueeze(0)
+                mask_tensor = transformed['mask'].tensor.unsqueeze(0)
 
             if config.interpolate:
                 brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
                 label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device) # unsqueeze channel
+                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device) # unsqueeze channel
             else:
                 brain_tensor = brain_tensor.to(device)
                 label_tensor = label_tensor.to(device)
+                mask_tensor = mask_tensor.to(device)
 
-            # set_trace()
             # forward pass
-            # label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
-            label_tensor_predicted = model(label_tensor) # [bs,1,ps,ps,ps]
+            label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
 
-            # set_trace()
             loss = criterion(label_tensor_predicted, label_tensor)
 
             if is_train:
@@ -145,8 +82,10 @@ def one_epoch(model,
                 opt.step()
 
             metric_dict[f'{loss_name}'].append(loss.item())
-
-            dice_score = DiceScoreBinary(label_tensor_predicted, label_tensor)
+            dice_score = DiceScoreBinary(label_tensor_predicted*mask_tensor, label_tensor)
+            coverage = (label_tensor_predicted*label_tensor).sum() / label_tensor.sum()
+            
+            metric_dict['coverage'].append(coverage.item())
             metric_dict['dice_score'].append(dice_score.item())
 
             print(f'Epoch: {epoch}, iter: {iter_i}, Loss_{loss_name}: {loss.item()}, DICE: {dice_score.item()}')
@@ -161,11 +100,11 @@ def one_epoch(model,
         target_metric = 0
         for title, value in metric_dict.items():
             m = np.mean(value)
+            metric_dict_epoch[phase_name + '_' + title].append(m)
+            if title=='dice_score': 
+                target_metric = m
             if writer is not None:
                 writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
-            metric_dict_epoch[phase_name + '_' + title].append(m)
-            if 'dice_score' == title:
-                target_metric = m
 
     except Exception as e:
         print ('Exception:', str(e), 'Failed to save writer')
@@ -174,10 +113,7 @@ def one_epoch(model,
 
 def main(args):
 
-
     print(f'Available devices: {torch.cuda.device_count()}')
-    
-
     with open(args.config) as fin:
         config = edict(yaml.safe_load(fin))
 
@@ -186,8 +122,6 @@ def main(args):
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
-
-    # os.system(f'CUDA_VISIBLE_DEVICES={DEVICE}')
 
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
@@ -202,7 +136,8 @@ def main(args):
 
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
     model = V2VModel(config).to(device)
-    print('Model created!')
+    capacity = get_capacity(model)
+    print(f'Model created! Capacity: {capacity}')
 
     if hasattr(config.model, 'weights'):
         model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
@@ -214,6 +149,8 @@ def main(args):
 
     train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
+    assert config.opt.train_batch_size == 1
+    assert config.opt.val_batch_size == 1
     print(len(train_dataloader), len(val_dataloader))
 
 
@@ -234,8 +171,8 @@ def main(args):
     # setting model stuff
     criterion = {
         # "CE": torch.nn.CrossEntropyLoss(),
-        "BCE": torch.nn.BCELoss(), # [probabilities, target]
-        "Dice": DiceLossBinary,
+        "BCE":torch.nn.BCELoss(), # [probabilities, target]
+        "Dice":DiceLossBinary,
         "FocalTversky":focal_tversky_loss(),
         
     }[config.opt.criterion]
@@ -251,7 +188,6 @@ def main(args):
     n_iters_total_val = 0
     target_metric = 0
     target_metric_prev = -1
-    epoch_to_save = 0
 
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
@@ -285,6 +221,7 @@ def main(args):
 
             if SAVE_MODEL and MAKE_LOGS:
                 if target_metric > target_metric_prev:
+                    print(f'target_metric = {target_metric}, SAVING...')
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
 

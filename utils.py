@@ -1,19 +1,29 @@
-import numpy as np
-from matplotlib import pyplot as plt
 import torch
 from IPython.core.debugger import set_trace
 from collections import defaultdict
 import glob
-from celluloid import Camera
 from IPython.core.display import HTML
 import os
 import nibabel
+import argparse
+
+from celluloid import Camera
+import numpy as np
+from matplotlib import pyplot as plt
+
+
+def get_capacity(model):
+    s_total = 0
+    for param in model.parameters():
+        s_total+=param.numel()
+    return round(s_total / (10**6),2)
 
 
 def video(brain_tensor, mask_tensor=None, n_slides=100):
 
     '''
     brain_tensor - single ndarray brain [H,W,D]
+    mask_tensor - single nndarray [H,W,D] masks to show ober the brain 
     '''
     
     fig, ax = plt.subplots()
@@ -39,6 +49,8 @@ def video_comparison(brains, masks=None, titles=None, n_slides=64):
     
     '''
     brains - list of ndarray [H,W,D] brains 
+    masks - list of ndarray [H,W,D] masks to show ober the brain 
+
     '''
     
     N = len(brains)
@@ -114,74 +126,59 @@ def trim(brain_tensor, label_tensor, mask_tensor=None):
 
 
 def create_dicts(root_label,
-                 root_data,
-                 root_geom_features=None,
-                 allowed_keys=None,
-                 USE_GEOM_FEATURES=False, 
-                 GEOM_FEATURES=None):
+                 feature_paths_templates, 
+                 broken_labels=None):
+
+    '''
+    feature_paths_templates - dict; feature_type:template
+    t1:/sub-{label}/anat/
+    '''
     
     keys = [p.split('.')[0] for p in os.listdir(root_label)]
-    if allowed_keys is not None:
-        keys = set(keys).intersection(set(allowed_keys))
+    if broken_labels is not None:
+        keys = set(keys)-set(broken_labels)
 
     paths_dict = defaultdict(dict)
     for label in keys:
-
-        sub_root = os.path.join(root_data, f'sub-{label}/anat/')
-        brain_path = glob.glob(os.path.join(sub_root, '*Asym_desc-preproc_T1w.nii.gz'))[0]
-        mask_path = glob.glob(os.path.join(sub_root, '*Asym_desc-brain_mask.nii.gz'))[0]
-        label_path = os.path.join(root_label, label + '.nii')   
-
-        if USE_GEOM_FEATURES:
+        for feature_type, template in feature_paths_templates.items():
+            
+            path = template.replace('{label}', label)
+            
+            # no such path
             try:
-                for g in GEOM_FEATURES:
-                    g_path = os.path.join(root_geom_features, f'{g}/norm-{label}.nii')
-                    if not os.path.isfile(g_path):
-                        raise RuntimeError
-                    else:
-                        paths_dict[label][g] = g_path 
-            except RuntimeError:
-                continue
+                path = glob.glob(path, recursive=True)[0]
+            except:
+                print(f'No {feature_type} for {label}')
+                if label in paths_dict.keys():
+                    paths_dict.pop(label)
+                break
 
-        paths_dict[label]['label'] = label_path
-        paths_dict[label]['brain'] = brain_path    
-        paths_dict[label]['mask'] = mask_path   
-                
+            paths_dict[label][feature_type] = path
+
     return paths_dict
 
 
 def normalize_(brain_tensor):
     return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
 
-def normalize(brain_tensor):
-    background = brain_tensor[0,0,0]
-    brain_tensor = brain_tensor - background # make background-level pixel to be zero
-    mask = brain_tensor != background
+def normalize(brain_tensor, mask=None):
+    
+    if mask is None:
+        background = brain_tensor[0,0,0]
+        brain_tensor = brain_tensor - background # make background-level pixel to be zero
+        mask = brain_tensor != background
+
+    brain_tensor[~mask] = 0
     brain_tensor[mask] = normalize_(brain_tensor[mask])
+    
     return brain_tensor
 
+
 def load(path_dict):
-    
-    '''
-    returns [brain_tensor, mask_tensor, label_tensor]
-    '''
-
-    mask_tensor = nibabel.load(path_dict['mask']).get_fdata() > 0
-    mask_tensor_int = mask_tensor.astype(int) 
-    brain_tensor = nibabel.load(path_dict['brain']).get_fdata() * mask_tensor_int
-    label_tensor = nibabel.load(path_dict['label']).get_fdata() * mask_tensor_int
-    label_tensor = (label_tensor > 0).astype('int')
-
-    # SHAPE = label_tensor.shape
-
-    # geom_features = []
-    # for k,v in path_dict.items():
-    #     if k not in ['mask', 'brain', 'label']:
-    #         geom_features.append()
-    #     assert SHAPE == v.shape
-
-    
-    return [brain_tensor, mask_tensor, label_tensor]
+    results = {}
+    for k,v in path_dict.items():
+        results[k] = nibabel.load(v).get_fdata()
+    return results
 
 
 
@@ -227,3 +224,62 @@ def pad_arrays(arrays_list, padding_size):
 
 
 
+def save(experiment_dir, model, opt, epoch):
+
+    checkpoint_dir = os.path.join(experiment_dir, "checkpoints") # , "{:04}".format(epoch)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    dict_to_save = {'model_state': model.state_dict(),'opt_state' : opt.state_dict(), 'epoch':epoch}
+
+    torch.save(dict_to_save, os.path.join(checkpoint_dir, "weights.pth"))
+
+
+def DiceScoreBinary(input, 
+                    target, 
+                    include_backgroud=False, 
+                    weights=None):
+    '''
+    Binary Dice score
+    input - [bs,1,ps,ps,ps], probability [0,1]
+    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
+    '''
+
+    # create "background" class
+    
+    if include_backgroud:
+        target_float = target.type(input.dtype)
+        background_tensor = torch.abs(target_float - 1.)
+        target_stacked = torch.cat([background_tensor, target_float], dim=1) # [bs,2,ps,ps,ps]
+        input_stacked = torch.cat([1-input, input], dim=1) # [bs,2,ps,ps,ps]
+        
+        intersection = torch.sum(input_stacked * target_stacked, dim=(2,3,4)) # [bs,2]
+        cardinality = torch.sum(torch.pow(input_stacked,2) + torch.pow(target_stacked,2), dim=(2,3,4)) # [bs,2]
+        dice_score = 2. * intersection / (cardinality + 1e-7) # [bs,2]
+        
+        if weights is not None:
+            dice_score = (dice_score*weights).sum(1)
+        
+    else:
+
+        target = target.squeeze(1) # cast to float and squeeze channel # .type(input.dtype)
+        input = input.squeeze(1) # squeeze channel
+        
+        intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
+        cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
+        dice_score = 2. * intersection / (cardinality + 1e-7)
+
+    return dice_score.mean()
+
+
+def DiceLossBinary(*args, **kwargs):
+    return 1 - DiceScoreBinary(*args, **kwargs)
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--logdir", type=str, default="")
+    parser.add_argument('--experiment_comment', default='', type=str)
+    args = parser.parse_args()
+    return args

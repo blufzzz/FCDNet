@@ -31,8 +31,8 @@ def create_datasets(config):
         train_dataset = BrainMaskDataset(config.dataset, train=True)
         val_dataset = BrainMaskDataset(config.dataset, train=False)
     elif config.dataset.dataset_type == 'brats_interpolated': 
-        train_dataset = Brats2020BrainMaskDataset(config.dataset, train=True)
-        val_dataset = Brats2020BrainMaskDataset(config.dataset, train=False)
+        train_dataset = Brats2020Dataset(config.dataset, train=True)
+        val_dataset = Brats2020Dataset(config.dataset, train=False)
     elif config.dataset.dataset_type == 'patches':
         train_dataset = BrainMaskDataset(config.dataset, train=True)
         val_dataset = BrainMaskDataset(config.dataset, train=False)
@@ -42,7 +42,7 @@ def create_datasets(config):
 
 
 
-class Brats2020BrainMaskDataset(Dataset):
+class Brats2020Dataset(Dataset):
 
     def __init__(self, config, train=True):
         self.root = config.root
@@ -54,7 +54,6 @@ class Brats2020BrainMaskDataset(Dataset):
         self.labels = self.metadata[metadata_key]
 
         self.paths = [os.path.join(self.root, f'BraTS20_Training_{k}/BraTS20_Training_{k}') for k in self.labels]
-        self.use_features = False
         self.features = None
 
     def __getitem__(self, idx):
@@ -88,38 +87,35 @@ class BrainMaskDataset(Dataset):
         self.root = config.root
         self.train = train
         self.trim_background = config.trim_background
+        self.metadata_path = config.metadata_path
 
-        self.metadata = np.load('metadata.npy',allow_pickle=True).item()
+        self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
         self.labels = self.metadata[metadata_key]
 
         self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]
-        
-        self.use_features = config.use_features
-        self.features = config.features if hasattr(config, 'features') else None
+        self.features = config.features 
 
     def __getitem__(self, idx):
 
         tensor_dict = torch.load(self.paths[idx])
-        brain_tensor_torch = tensor_dict['brain']
-        mask_tensor_torch = tensor_dict['mask']
         label_tensor_torch = tensor_dict['label']
+        mask_tensor_torch = None
+        if 'mask' in tensor_dict.keys():
+            mask_tensor_torch = tensor_dict['mask']
 
-        if self.use_features:
-            assert self.features is not None
-            brain_tensor_torch = torch.stack([brain_tensor_torch] + \
-                                            [tensor_dict[f] for f in self.features],
-                                            dim=0)
-        else:
-            brain_tensor_torch = brain_tensor_torch.unsqueeze(0)
+        if self.features == 'ALL':
+            self.features = set(tensor_dict.keys()) - {'label', 'mask'}
+
+        brain_tensor_torch = torch.stack([tensor_dict[f] for f in self.features], dim=0)
 
         if self.trim_background:
             brain_tensor_torch, label_tensor_torch, mask_tensor_torch = trim(brain_tensor_torch, 
-                                                                                label_tensor_torch,
-                                                                                mask_tensor_torch)
-
-        return brain_tensor_torch,\
+                                                                             label_tensor_torch,
+                                                                             mask_tensor_torch)
+        return brain_tensor_torch, \
+                mask_tensor_torch.unsqueeze(0), \
                 label_tensor_torch.unsqueeze(0)
 
     def __len__(self):
-        return len(self.paths)
+        return len(self.labels)
