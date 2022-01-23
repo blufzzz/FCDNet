@@ -80,6 +80,11 @@ def one_epoch(model,
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
+            else:
+                if config.dataset.save_val_predictions:
+                    label = dataloader.dataset.labels[iter_i]
+                    torch.save(label_tensor_predicted.detach().cpu(),
+                                os.path.join(config.dataset.val_preds_path, f'{label}'))
 
             metric_dict[f'{loss_name}'].append(loss.item())
             dice_score = DiceScoreBinary(label_tensor_predicted*mask_tensor, label_tensor)
@@ -125,14 +130,17 @@ def main(args):
 
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
+
     
     if MAKE_LOGS:
         experiment_dir = os.path.join(args.logdir, experiment_name)
         if os.path.isdir(experiment_dir):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
-
         shutil.copy(args.config, os.path.join(experiment_dir, "config.yaml"))
+        if config.dataset.save_val_predictions:
+            val_preds_path = os.makedirs(os.path.join(experiment_dir, 'val_preds'))
+            config.dataset.val_preds_path = val_preds_path
 
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
     model = V2VModel(config).to(device)

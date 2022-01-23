@@ -4,10 +4,7 @@ from IPython.core.debugger import set_trace
 from datetime import datetime
 import os
 import shutil
-import argparse
 import time
-import json
-import glob
 from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score
 from datasets import create_datasets
 import yaml
@@ -29,45 +26,11 @@ import torchio as tio
 
 from utils import get_capacity, normalize_, save, DiceScoreBinary, DiceLossBinary, parse_args
 from IPython.core.display import display, HTML
-from train import DiceScoreBinary, parse_args, 
 
 from multiprocessing import cpu_count
 N_CPU = cpu_count()
 SEED = 42
 
-
-# import logging
-# logging.basicConfig(filename='/media/tom/ibulygin/FCDNet/error_logs',level=logging.DEBUG)
-
-
-# def collate_fn(batch_list):
-#     '''
-#     batch_list: [(brain, mask, label),...,(brain, mask, label)]
-#     '''
-#     set_trace()
-#     if len(batch_list) == 1: 
-
-#         set_trace()
-
-#         brains = [b[0] for b in batch_list]
-#         masks = [b[1] for b in batch_list]
-#         labels = [b[2] for b in batch_list]
-
-#         brains = torch.stack(brains, dim=0)
-#         masks = torch.stack(masks, dim=0)
-#         labels = torch.stack(labels, dim=0)
-
-#     # may be different sizes!
-#     else:
-
-#         # find minimal shape
-#         shape = torch.tensor([[*b[0].shape[1:]] for b in batch_list]).min(0)[0]
-
-#         brains = [F.interpolate(b[0].unsqueeze(0), shape).squeeze(0) for b in batch_list]
-#         masks = [F.interpolate(b[1].unsqueeze(0), shape).squeeze(0) for b in batch_list]
-#         labels = [F.interpolate(b[2].unsqueeze(0), shape).squeeze(0) for b in batch_list]
-
-#     return brains, masks, labels
 
 def one_epoch(model, 
                 criterion, 
@@ -133,11 +96,14 @@ def one_epoch(model,
 
                         sampling_map = mask_tensor[batch_index].clone()
                         sampling_map[label_tensor[batch_index].type(torch.bool)] = 2
-
+                        label_sample_coeff = (mask_tensor[batch_index].sum() / label_tensor[batch_index].sum())
+                        label_sample_coeff = label_sample_coeff.item()
                         sampler = tio.data.LabelSampler(
                                                         patch_size=patch_size,
                                                         label_name='sampling_map',
-                                                        label_probabilities={0:0,1:1,2:1},
+                                                        label_probabilities={0:0,
+                                                        1:1,
+                                                        2:1}, # label_sample_coeff
                                                         )
                     else:
                         raise RuntimeError('Unknown sampler_type!')
@@ -149,11 +115,10 @@ def one_epoch(model,
 
                     if augmentation is not None:
                         subject = augmentation(subject)
-
                     subjects_list.append(subject)
 
                 subjects_dataset = tio.SubjectsDataset(subjects_list)
-                                                            
+                
                 patches_queue = tio.Queue(
                     subjects_dataset,
                     queue_length,
@@ -161,7 +126,6 @@ def one_epoch(model,
                     sampler,
                     num_workers=4
                 )
-
                 patch_loader = DataLoader(
                     patches_queue,
                     batch_size=patch_batch_size,
@@ -170,14 +134,13 @@ def one_epoch(model,
 
             else:
                 label = labels[iter_i]
-
                 assert brain_tensor.shape[0] == 1
                 n_fcd = label_tensor.sum()
                 subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
                                       label=tio.LabelMap(tensor=label_tensor[0]),
                                       n_fcd=n_fcd)
 
-                patch_overlap = patch_size-4 #patch_size//2 
+                patch_overlap = patch_size - (patch_size//4) # 0.75
                 grid_sampler = tio.inference.GridSampler(
                     subject, # validation subject
                     patch_size,
@@ -192,10 +155,12 @@ def one_epoch(model,
             #############################################################################
             # number of FCD pixels in patch to be considered as FCD patch
             metric_dict_patch = defaultdict(list)
-            n_calculated = 0
-            prob_fcd = []
+            targets_all = []
+            probs_all = []
+            preds_all = []
+
             for patch_i, patches_batch in enumerate(patch_loader):
-                
+
                 inputs = patches_batch['t1'][tio.DATA].to(device)  # [bs,C,p,p,p]
                 targets = patches_batch['label'][tio.DATA].to(device) # [bs,1,p,p,p]
                 n_fcd = patches_batch['n_fcd'].to(device).unsqueeze(1)
@@ -203,12 +168,7 @@ def one_epoch(model,
                 targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
                 targets_ = targets_.type(torch.float32)
 
-                balance = targets_.sum() / len(targets_)
-
-                if is_train and (balance < 0.1 or balance==1):
-                    continue
-                else:
-                    n_calculated += 1
+                print(targets_.flatten())
 
                 logits = model(inputs)
                 loss = criterion(logits, targets_) # [bs,1], [bs,1]
@@ -219,6 +179,7 @@ def one_epoch(model,
                     opt.step()
                 else:
                     locations = patches_batch[tio.LOCATION]
+                    # casting back to patch
                     outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
                     aggregator.add_batch(outputs, locations)
 
@@ -226,52 +187,56 @@ def one_epoch(model,
                 # per-PATCH METRICS #
                 #####################
                 # map to and remove last dim
-                prob_pred_np = torch.sigmoid(logits.squeeze(-1)).detach().cpu().numpy() # [bs,]
                 targets_np = targets_.squeeze(-1).detach().cpu().numpy().astype(int) # [bs,]
-
-                targets_pred_np = (prob_pred_np > classification_threshold).astype(int)
+                prob_pred_np = torch.sigmoid(logits.squeeze(-1)).detach().cpu().numpy() # [bs,]
+                targets_pred_np = (prob_pred_np >= classification_threshold).astype(int)
                 
-                accuracy = accuracy_score(targets_np, targets_pred_np)
-                metric_dict_patch['accuracy'].append(accuracy)
+                targets_all += list(targets_np)
+                probs_all += list(prob_pred_np)
+                preds_all += list(targets_pred_np)
 
                 metric_dict_patch[f'{loss_name}'].append(loss.item())
-
-                if not is_train:
-                    prob_fcd.append(np.stack([prob_pred_np, targets_np], axis=-1))
-            
             ##############################################################################
-            n_patches = len(patch_loader)
-            print(f'Calculated for index {label}: {n_calculated} from {n_patches}')
+            class_balance = np.mean(targets_all)
+            metric_dict['class_balance'].append(class_balance)
+            if class_balance == 0:
+                print(f'Class_balance for {label} is 0!')
+
             for k,v in metric_dict_patch.items():
-                if n_calculated > 0:
-                    metric_dict[k].append(np.mean(v))
+                metric_dict[k].append(np.mean(v))
 
+            targets_all=np.array(targets_all)
+            probs_all=np.array(probs_all)
+            preds_all=np.array(preds_all)
+
+            precision = precision_score(targets_all, preds_all, zero_division=0)
+            recall = recall_score(targets_all, preds_all, zero_division=0)
+            try:
+                roc_auc = roc_auc_score(targets_all, probs_all)
+            except Exception as e:
+                print(e)
+                roc_auc = 0
+
+            metric_dict['precision'].append(precision)
+            metric_dict['recall'].append(recall)
+            metric_dict['roc_auc'].append(roc_auc)
+            
+            # Gris sample on validation
             if not is_train:
-                prob_fcd = np.concatenate(prob_fcd, axis=0)
 
-                prob_pred_all = prob_fcd[:,0]
-                targets_pred_all = (prob_pred_all > classification_threshold).astype(int)
-                targets_all = prob_fcd[:,1]
-
-                precision = precision_score(targets_all, targets_pred_all, zero_division=0)
-                recall = recall_score(targets_all, targets_pred_all, zero_division=0)
-                roc_auc = roc_auc_score(targets_all, prob_pred_all)
-
-                # accuracy = accuracy_score(targets_all, targets_pred_all)
-                # metric_dict['accuracy'].append(accuracy)
-
-                metric_dict['precision'].append(precision)
-                metric_dict['recall'].append(recall)
-                metric_dict['roc_auc'].append(roc_auc)
-
+                ###########
+                # HITRATE #
+                ###########
                 # sorting by predicted probabilities
-                argsort = np.argsort(prob_fcd[:,0], axis=0)[::-1]
-                fcd_sorted = prob_fcd[argsort][:,1]
+                argsort = np.argsort(probs_all, axis=0)[::-1]
                 for top_k in top_k_list:
-                    top_k_fcd = fcd_sorted[:top_k]
-                    hitrate = top_k_fcd.mean() #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
+                    top_k_fcd = targets_all[argsort][:top_k]
+                    hitrate = top_k_fcd.mean() / top_k #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
                     metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
 
+                ########
+                # DICE #
+                ########
                 output_tensor = aggregator.get_output_tensor().unsqueeze(1) # [1,1,H,W,D]
                 output_tensor = output_tensor * mask_tensor # zeros all non mask values
                 dice = DiceScoreBinary(output_tensor, label_tensor).item()
@@ -279,41 +244,29 @@ def one_epoch(model,
                 metric_dict['dice_score'].append(dice)
                 metric_dict['coverage'].append(coverage.item())
 
-                print(f'Dice: {dice} for val {label}')
+            #########
+            # PRINT #
+            #########
+            message = f'For {phase_name}, {label},'
+            for title, value in metric_dict.items():
+                v = np.round(value[-1],3)
+                message+=f' {title}:{v}'
+            print(message)
 
-                # set_trace()
-
-
-            if is_train and writer is not None:
+            if writer is not None:
                 for title, value in metric_dict.items():
-                    if n_calculated > 0:
-                        writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
-            
-            # set_trace()
-            ############
-            # PRINTING #
-            ############
-            if n_calculated > 0:
-                loss_mean = metric_dict[f'{loss_name}'][-1]
-                message = f'Epoch:{epoch}, iter:{iter_i}, loss-{loss_name}:{loss_mean}'
-                if not is_train:
-                    message += f', DICE:{dice}'
-                print(message)
+                    writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
 
             n_iters_total += 1
-
-    try:
-        target_metric = 0
-        for title, value in metric_dict.items():
-            m = np.mean(value)
-            if writer is not None:
-                writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
-            metric_dict_epoch[phase_name + '_' + title].append(m)
-            if 'dice_score' == title:
-                target_metric = m
-
-    except Exception as e:
-        print ('Exception:', str(e), 'Failed to save writer')
+    
+    ###################
+    # PER-EPOCH STATS #
+    ###################
+    for title, value in metric_dict.items():
+        m = np.mean(value)
+        metric_dict_epoch[phase_name + '_' + title].append(m)
+        if writer is not None:
+            writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
 
     return n_iters_total, target_metric
 
@@ -346,9 +299,8 @@ def main(args):
     ################
     # CREATE MODEL #
     ################
-    model = torchvision.models.video.r2plus1d_18(pretrained=False, progress=False) 
+    model = torchvision.models.video.r3d_18(pretrained=False, progress=False)
     conv3d_1 = model.stem[0]
-    
     # features
     if config.dataset.features == 'ALL':
         input_channels = 10
@@ -391,7 +343,7 @@ def main(args):
 
     augmentation = None
     if config.opt.augmentation:
-        symmetry = tio.RandomFlip(axes=0)
+        symmetry = tio.RandomFlip(axes=0) 
         bias = tio.RandomBiasField(coefficients=0.3)
         noise = tio.RandomNoise(std=(0,1e-3))
         affine = tio.RandomAffine(scales=(0.9, 1.1, 0.9, 1.1, 0.9, 1.1), 
@@ -451,6 +403,7 @@ def main(args):
 
             if SAVE_MODEL and MAKE_LOGS:
                 if target_metric > target_metric_prev:
+                    print(f'target_metric = {target_metric}, SAVING...')
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
 

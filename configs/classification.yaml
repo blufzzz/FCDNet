@@ -1,7 +1,7 @@
-make_logs: true
+make_logs: false
 
 opt:
-  device: 1
+  device: 2
   criterion: "BCE"  
  
   start_epoch: 0
@@ -27,10 +27,10 @@ dataset:
   # root: '../fcd_data/normalized_tensors'
   dataset_type: 'patches'
   sampler_type: 'labels' #'weights' 
-  patch_size : 64
+  patch_size : 32
   shuffle_train: false
-  samples_per_volume : 500
-  patch_batch_size : 2
+  samples_per_volume : 1000
+  patch_batch_size : 10
   top_k_list: [10, 50, 100]
-  patch_fcd_threshold: 0.8
+  patch_fcd_threshold: 0.5
   
