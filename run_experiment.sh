@@ -1,8 +1,8 @@
 #!/bin/bash
-python train_classification.py \
---logdir=./logs_clf \
---config=./configs/classification.yaml \
---experiment_comment='resnet3d_ps32_bs1_pbs10_clf0.5_fcd0.8_ALL_AUG_trim_LS1-ratio' 
+python train_prec_classification.py \
+--logdir=./logs_prec_clf \
+--config=./configs/prec_patch_classification.yaml \
+--experiment_comment='resnet3d_ps52_bs1_pbs32_clf0.5_fcd0.5_ALL_trim_pw1_BalRes_ep200' 
 
 # python train.py \
 # --logdir=./logs \

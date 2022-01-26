@@ -1,0 +1,36 @@
+make_logs: true
+ 
+opt:
+  device: 2
+  criterion: "BCE" 
+  pos_weight: 1
+
+  start_epoch: 0
+  n_epochs: 9999
+  epoch_length: 200
+
+  augmentation: false
+
+  val_batch_size: 1
+
+  lr: 0.0005 # default - 0.0001 
+  save_model: true
+
+model:
+  classification_threshold : 0.5
+  use_greedy_saving: false
+  target_metric: 'f1_score'
+
+dataset:
+  trim_background: true
+  dataset_type: 'patches_prec'
+  patches_dataframes_merged_path: 'patches_dataframes_merged'
+  patch_dataframe_path: 'patches_dataframes'
+  metadata_path: '/nfs/garfield/ibulygin/metadata_v2.npy'
+  fcd_threshold: 0.5
+  features: 'ALL' 
+  root: '/nfs/garfield/ibulygin/tensors_v2'
+  patch_size: 32
+  patch_batch_size: 52 # train batch size
+  make_balanced_resampling: true
+  
