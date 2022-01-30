@@ -140,13 +140,13 @@ def one_epoch_val(model,
             precision = precision_score(targets_all, preds_all, zero_division=0)
             recall = recall_score(targets_all, preds_all, zero_division=0)
             roc_auc = roc_auc_score(targets_all, probs_all)
-            f1_score = f1_score(targets_all, preds_all, average='weighted')
+            f1 = f1_score(targets_all, preds_all, average='weighted')
 
             metric_dict['accuracy'].append(accuracy)
             metric_dict['precision'].append(precision)
             metric_dict['recall'].append(recall)
             metric_dict['roc_auc'].append(roc_auc)
-            metric_dict['f1_score'].append(f1_score)
+            metric_dict['f1'].append(f1)
 
             ###########
             # HITRATE #
@@ -200,12 +200,11 @@ def one_epoch_val(model,
 
 
 
-def one_epoch(model, 
+def one_epoch_train(model, 
                 criterion, 
                 opt,
                 config, 
-                train_dataloader,
-                val_dataloader, 
+                dataloader, 
                 device, 
                 writer, 
                 epoch, 
@@ -229,8 +228,11 @@ def one_epoch(model,
     probs_all = []
 
     with torch.autograd.enable_grad():
-        iterator = enumerate(train_dataloader)
+        iterator = enumerate(dataloader)
         for iter_i, (patches, targets) in tqdm(iterator): # takes a lot for long datasets
+
+            if iter_i >= config.opt.epoch_length:
+                break
             
             # patches - [bs,C,ps,ps,ps]
             # targets - [bs,1]
@@ -275,7 +277,7 @@ def one_epoch(model,
     recall = recall_score(targets_all, preds_all)
     precision = precision_score(targets_all, preds_all)
     roc_auc = roc_auc_score(targets_all, probs_all)
-    f1_score = f1_score(targets_all, preds_all, average='weighted')
+    f1 = f1_score(targets_all, preds_all, average='weighted')
 
     target_metric = roc_auc
     
@@ -284,8 +286,7 @@ def one_epoch(model,
         writer.add_scalar(f"{phase_name}_recall-all_epoch", recall, epoch)
         writer.add_scalar(f"{phase_name}_precision-all_epoch", precision, epoch)
         writer.add_scalar(f"{phase_name}_rocauc-all_epoch", roc_auc, epoch)
-        writer.add_scalar(f"{phase_name}_f1-all_epoch", f1_score, epoch)
-
+        writer.add_scalar(f"{phase_name}_f1-all_epoch", f1, epoch)
 
     for title, value in metric_dict.items():
         m = np.mean(value)
@@ -295,7 +296,6 @@ def one_epoch(model,
         print(f'Epoch {epoch} value {title}:', m)
 
     return n_iters_total, target_metric
-
 
 
 def main(args):
@@ -402,12 +402,11 @@ def main(args):
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
             print (f'TRAIN EPOCH: {epoch} ... ')
-            n_iters_total_train, _  = one_epoch(model, 
+            n_iters_total_train, _  = one_epoch_train(model, 
                                             criterion, 
                                             opt, 
                                             config, 
                                             train_dataloader, 
-                                            val_dataloader,
                                             device, 
                                             writer, 
                                             epoch, 
@@ -416,12 +415,12 @@ def main(args):
                                             augmentation=augmentation)
             # to ensure we get new negative samples on each epoch
             if config.dataset.make_balanced_resampling:
-                train_dataset = PatchesDataset(config.dataset, force_rebuild=True, train=True)
+                # train_dataset = PatchesDataset(config.dataset, force_rebuild=True, train=True)
                 train_dataloader = DataLoader(train_dataset, 
                                         batch_size=config.dataset.patch_batch_size,
                                         shuffle=True, # shuffle patches
                                         collate_fn=collate_fn)
-            
+            print (f'VAL EPOCH: {epoch} ... ')
             n_iters_total_val, target_metric = one_epoch_val(model, 
                                                 criterion, 
                                                 opt, 
