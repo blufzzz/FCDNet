@@ -154,7 +154,6 @@ class PatchesDataset(Dataset):
         #     return s
 
 
-
 class Brats2020Dataset(Dataset):
 
     def __init__(self, config, train=True):
@@ -186,8 +185,9 @@ class Brats2020Dataset(Dataset):
             brain_tensor_torch, label_tensor_torch, mask_tensor_torch = trim(brain_tensor_torch, 
                                                                              label_tensor_torch)
             
-
-        return brain_tensor_torch, label_tensor_torch.unsqueeze(0)
+        return brain_tensor_torch,\
+                mask_tensor_torch.unsqueeze(0),\
+                label_tensor_torch.unsqueeze(0)
 
     def __len__(self):
         return len(self.paths)

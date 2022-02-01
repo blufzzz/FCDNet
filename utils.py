@@ -225,13 +225,10 @@ def pad_arrays(arrays_list, padding_size):
 
 
 def save(experiment_dir, model, opt, epoch):
-
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints") # , "{:04}".format(epoch)
     os.makedirs(checkpoint_dir, exist_ok=True)
-
     dict_to_save = {'model_state': model.state_dict(),'opt_state' : opt.state_dict(), 'epoch':epoch}
-
-    torch.save(dict_to_save, os.path.join(checkpoint_dir, "weights.pth"))
+    torch.save(dict_to_save, os.path.join(checkpoint_dir, f"weights_{epoch}.pth"))
 
 
 def DiceScoreBinary(input, 

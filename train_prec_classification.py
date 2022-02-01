@@ -155,7 +155,7 @@ def one_epoch_val(model,
             argsort = np.argsort(probs_all, axis=0)[::-1]
             for top_k in top_k_list:
                 top_k_fcd = targets_all[argsort][:top_k]
-                hitrate = top_k_fcd.mean() / top_k #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
+                hitrate = top_k_fcd.mean() #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
                 metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
 
             ########

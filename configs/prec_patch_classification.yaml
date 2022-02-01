@@ -1,9 +1,9 @@
-make_logs: true
+make_logs: false
  
 opt:
-  device: 2
+  device: 1
   criterion: "BCE" 
-  pos_weight: 1
+  pos_weight: 0.1
 
   start_epoch: 0
   n_epochs: 9999
@@ -13,7 +13,7 @@ opt:
 
   val_batch_size: 1
 
-  lr: 0.0005 # default - 0.0001 
+  lr: 0.001 # default-0.0001 
   save_model: true
 
 model:
@@ -27,7 +27,7 @@ dataset:
   patches_dataframes_merged_path: 'patches_dataframes_merged'
   patch_dataframe_path: 'patches_dataframes'
   metadata_path: '/nfs/garfield/ibulygin/metadata_v2.npy'
-  fcd_threshold: 0.5
+  fcd_threshold: 0.8
   features: 'ALL' 
   root: '/nfs/garfield/ibulygin/tensors_v2'
   patch_size: 32

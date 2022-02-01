@@ -77,15 +77,12 @@ def one_epoch(model,
             ###########################
             if is_train:
                 batch_size = len(brain_tensor)
-
                 label = labels[iter_i] if shuffle_train and batch_size==1 else iter_i
                 # from batch to list of subjects
                 subjects_list = []
                 for batch_index in range(batch_size):
-
                     n_fcd = label_tensor[batch_index].sum()
                     if sampler_type == 'weights': 
-                        
                         n_brain = mask_tensor[batch_index].sum()
                         k = n_brain / n_fcd
                         sampling_map = mask_tensor[batch_index].clone()
@@ -93,7 +90,6 @@ def one_epoch(model,
                         sampler = tio.data.WeightedSampler(patch_size, 'sampling_map')
 
                     elif sampler_type == 'labels':
-
                         sampling_map = mask_tensor[batch_index].clone()
                         sampling_map[label_tensor[batch_index].type(torch.bool)] = 2
                         label_sample_coeff = (mask_tensor[batch_index].sum() / label_tensor[batch_index].sum())
@@ -105,6 +101,21 @@ def one_epoch(model,
                                                         1:1,
                                                         2:1}, # label_sample_coeff
                                                         )
+                    elif sampler_type == 'grid':
+                        subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
+                                      label=tio.LabelMap(tensor=label_tensor[0]),
+                                      n_fcd=n_fcd)
+
+                        patch_overlap = patch_size - (patch_size//4) # 0.75
+                        grid_sampler = tio.inference.GridSampler(
+                            subject, # validation subject
+                            patch_size,
+                            patch_overlap
+                        )
+
+                patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
+                aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
+                        
                     else:
                         raise RuntimeError('Unknown sampler_type!')
 

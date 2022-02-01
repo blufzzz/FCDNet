@@ -2,7 +2,7 @@
 python train_prec_classification.py \
 --logdir=./logs_prec_clf \
 --config=./configs/prec_patch_classification.yaml \
---experiment_comment='resnet3d_ps32_bs1_pbs52_clf0.5_fcd0.5_lr-5e-4_ALL_trim_pw1_BalRes_ep200-reshuffle' 
+--experiment_comment='resnet3d_ps32_bs1_pbs52_clf0.5_fcd0.8_lr-1e-3_ALL_trim_pw0.1_BalRes_ep200-reshuffle' 
 
 # python train.py \
 # --logdir=./logs \
