@@ -34,6 +34,9 @@ def create_datasets(config):
     elif config.dataset.dataset_type == 'brats_interpolated': 
         train_dataset = Brats2020Dataset(config.dataset, train=True)
         val_dataset = Brats2020Dataset(config.dataset, train=False)
+    elif config.dataset.dataset_type == 'brats_patches_tio': 
+        train_dataset = Brats2020Dataset(config.dataset, train=True)
+        val_dataset = Brats2020Dataset(config.dataset, train=False)
     elif config.dataset.dataset_type == 'patches_tio':
         train_dataset = BrainMaskDataset(config.dataset, train=True)
         val_dataset = BrainMaskDataset(config.dataset, train=False)

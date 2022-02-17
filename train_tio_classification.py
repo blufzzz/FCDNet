@@ -5,7 +5,7 @@ from datetime import datetime
 import os
 import shutil
 import time
-from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
 from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
@@ -31,7 +31,6 @@ from multiprocessing import cpu_count
 N_CPU = cpu_count()
 SEED = 42
 
-
 def one_epoch(model, 
                 criterion, 
                 opt, 
@@ -52,8 +51,6 @@ def one_epoch(model,
     patch_size = config.dataset.patch_size
     patch_batch_size = config.dataset.patch_batch_size
     batch_size = config.opt.train_batch_size if is_train else config.opt.val_batch_size
-    samples_per_volume = config.dataset.samples_per_volume
-    queue_length = batch_size*samples_per_volume
     classification_threshold = config.model.classification_threshold
     sampler_type = config.dataset.sampler_type
     patch_fcd_threshold = config.dataset.patch_fcd_threshold 
@@ -67,99 +64,32 @@ def one_epoch(model,
     with grad_context():
         iterator = enumerate(dataloader)
 
-        # brain_tensor - [bs,C,H,W,D]
-        # mask_tensor - [bs,1,H,W,D]
-        # label_tensor - [bs,1,H,W,D]
+        # bs = 1
+        # brain_tensor - [1,C,H,W,D]
+        # mask_tensor - [1,1,H,W,D]
+        # label_tensor - [1,1,H,W,D]
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
+
+            if label_tensor.sum() == 0:
+                continue
 
             ###########################
             # SETUP PATCH DATALOADERS #
             ###########################
-            if is_train:
-                batch_size = len(brain_tensor)
-                label = labels[iter_i] if shuffle_train and batch_size==1 else iter_i
-                # from batch to list of subjects
-                subjects_list = []
-                for batch_index in range(batch_size):
-                    n_fcd = label_tensor[batch_index].sum()
-                    if sampler_type == 'weights': 
-                        n_brain = mask_tensor[batch_index].sum()
-                        k = n_brain / n_fcd
-                        sampling_map = mask_tensor[batch_index].clone()
-                        sampling_map[label_tensor[batch_index].type(torch.bool)] = 2*int(k)
-                        sampler = tio.data.WeightedSampler(patch_size, 'sampling_map')
+            label = labels[iter_i]
+            n_fcd = label_tensor.sum()
+            subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
+                          label=tio.LabelMap(tensor=label_tensor[0]),
+                          n_fcd=n_fcd)
+            
+            if is_train and (augmentation is not None):
+                subject = augmentation(subject)
 
-                    elif sampler_type == 'labels':
-                        sampling_map = mask_tensor[batch_index].clone()
-                        sampling_map[label_tensor[batch_index].type(torch.bool)] = 2
-                        label_sample_coeff = (mask_tensor[batch_index].sum() / label_tensor[batch_index].sum())
-                        label_sample_coeff = label_sample_coeff.item()
-                        sampler = tio.data.LabelSampler(
-                                                        patch_size=patch_size,
-                                                        label_name='sampling_map',
-                                                        label_probabilities={0:0,
-                                                        1:1,
-                                                        2:1}, # label_sample_coeff
-                                                        )
-                    elif sampler_type == 'grid':
-                        subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
-                                      label=tio.LabelMap(tensor=label_tensor[0]),
-                                      n_fcd=n_fcd)
+            patch_overlap = int(patch_size*0.9)
+            grid_sampler = tio.inference.GridSampler(subject, patch_size, patch_overlap)
 
-                        patch_overlap = patch_size - (patch_size//4) # 0.75
-                        grid_sampler = tio.inference.GridSampler(
-                            subject, # validation subject
-                            patch_size,
-                            patch_overlap
-                        )
-
-                patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
-                aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
-                        
-                    else:
-                        raise RuntimeError('Unknown sampler_type!')
-
-                    subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[batch_index]),
-                                          label=tio.LabelMap(tensor=label_tensor[batch_index]),
-                                          sampling_map=sampling_map,
-                                          n_fcd=n_fcd)
-
-                    if augmentation is not None:
-                        subject = augmentation(subject)
-                    subjects_list.append(subject)
-
-                subjects_dataset = tio.SubjectsDataset(subjects_list)
-                
-                patches_queue = tio.Queue(
-                    subjects_dataset,
-                    queue_length,
-                    samples_per_volume,
-                    sampler,
-                    num_workers=4
-                )
-                patch_loader = DataLoader(
-                    patches_queue,
-                    batch_size=patch_batch_size,
-                    num_workers=0,  # this must be 0
-                )
-
-            else:
-                label = labels[iter_i]
-                assert brain_tensor.shape[0] == 1
-                n_fcd = label_tensor.sum()
-                subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
-                                      label=tio.LabelMap(tensor=label_tensor[0]),
-                                      n_fcd=n_fcd)
-
-                patch_overlap = patch_size - (patch_size//4) # 0.75
-                grid_sampler = tio.inference.GridSampler(
-                    subject, # validation subject
-                    patch_size,
-                    patch_overlap
-                )
-
-                patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
-                aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
+            patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
+            aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
 
             ########################
             # ITERATE OVER PATCHES #
@@ -169,7 +99,7 @@ def one_epoch(model,
             targets_all = []
             probs_all = []
             preds_all = []
-
+            print(f'Iterating for {label}, {len(patch_loader)}')
             for patch_i, patches_batch in enumerate(patch_loader):
 
                 inputs = patches_batch['t1'][tio.DATA].to(device)  # [bs,C,p,p,p]
@@ -177,9 +107,8 @@ def one_epoch(model,
                 n_fcd = patches_batch['n_fcd'].to(device).unsqueeze(1)
                 
                 targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
+                targets_ += (targets.sum([-1,-2,-3]) / (patch_size**3)) >= patch_fcd_threshold
                 targets_ = targets_.type(torch.float32)
-
-                print(targets_.flatten())
 
                 logits = model(inputs)
                 loss = criterion(logits, targets_) # [bs,1], [bs,1]
@@ -188,11 +117,11 @@ def one_epoch(model,
                     opt.zero_grad()
                     loss.backward()
                     opt.step()
-                else:
-                    locations = patches_batch[tio.LOCATION]
-                    # casting back to patch
-                    outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
-                    aggregator.add_batch(outputs, locations)
+
+                locations = patches_batch[tio.LOCATION]
+                # casting back to patch
+                outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
+                aggregator.add_batch(outputs, locations)
 
                 #####################
                 # per-PATCH METRICS #
@@ -207,11 +136,13 @@ def one_epoch(model,
                 preds_all += list(targets_pred_np)
 
                 metric_dict_patch[f'{loss_name}'].append(loss.item())
+            
             ##############################################################################
             class_balance = np.mean(targets_all)
             metric_dict['class_balance'].append(class_balance)
+            print(f'Class_balance for {label} is {class_balance}!')
             if class_balance == 0:
-                print(f'Class_balance for {label} is 0!')
+                set_trace()
 
             for k,v in metric_dict_patch.items():
                 metric_dict[k].append(np.mean(v))
@@ -220,40 +151,37 @@ def one_epoch(model,
             probs_all=np.array(probs_all)
             preds_all=np.array(preds_all)
 
+            accuracy = accuracy_score(targets_all, preds_all)
             precision = precision_score(targets_all, preds_all, zero_division=0)
             recall = recall_score(targets_all, preds_all, zero_division=0)
-            try:
-                roc_auc = roc_auc_score(targets_all, probs_all)
-            except Exception as e:
-                print(e)
-                roc_auc = 0
+            roc_auc = roc_auc_score(targets_all, probs_all)
+            f1 = f1_score(targets_all, preds_all, average='weighted')
 
+            metric_dict['accuracy'].append(accuracy)
             metric_dict['precision'].append(precision)
             metric_dict['recall'].append(recall)
             metric_dict['roc_auc'].append(roc_auc)
-            
-            # Gris sample on validation
-            if not is_train:
+            metric_dict['f1'].append(f1)
 
-                ###########
-                # HITRATE #
-                ###########
-                # sorting by predicted probabilities
-                argsort = np.argsort(probs_all, axis=0)[::-1]
-                for top_k in top_k_list:
-                    top_k_fcd = targets_all[argsort][:top_k]
-                    hitrate = top_k_fcd.mean() / top_k #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
-                    metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
+            ###########
+            # HITRATE #
+            ###########
+            # sorting by predicted probabilities
+            argsort = np.argsort(probs_all, axis=0)[::-1]
+            for top_k in top_k_list:
+                top_k_fcd = targets_all[argsort][:top_k]
+                hitrate = top_k_fcd.mean() #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
+                metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
 
-                ########
-                # DICE #
-                ########
-                output_tensor = aggregator.get_output_tensor().unsqueeze(1) # [1,1,H,W,D]
-                output_tensor = output_tensor * mask_tensor # zeros all non mask values
-                dice = DiceScoreBinary(output_tensor, label_tensor).item()
-                coverage = (output_tensor*label_tensor).sum() / label_tensor.sum()
-                metric_dict['dice_score'].append(dice)
-                metric_dict['coverage'].append(coverage.item())
+            ########
+            # DICE #
+            ########
+            output_tensor = aggregator.get_output_tensor().unsqueeze(1) # [1,1,H,W,D]
+            output_tensor = output_tensor * mask_tensor # zeros all non mask values
+            dice = DiceScoreBinary(output_tensor, label_tensor).item()
+            coverage = (output_tensor*label_tensor).sum() / label_tensor.sum()
+            metric_dict['dice_score'].append(dice)
+            metric_dict['coverage'].append(coverage.item())
 
             #########
             # PRINT #
@@ -269,15 +197,22 @@ def one_epoch(model,
                     writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
 
             n_iters_total += 1
-    
+
+            break
+
     ###################
     # PER-EPOCH STATS #
     ###################
+    target_metric = 0
     for title, value in metric_dict.items():
         m = np.mean(value)
         metric_dict_epoch[phase_name + '_' + title].append(m)
         if writer is not None:
             writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
+        if title == config.opt.target_metric_name:
+            target_metric = m
+        else:
+            print('No target metric was found!')
 
     return n_iters_total, target_metric
 
@@ -294,7 +229,10 @@ def main(args):
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
+    # essential for the proper samplers functioning
     assert config.opt.val_batch_size == 1
+    assert config.opt.train_batch_size == 1
+    assert config.dataset.sampler_type == 'grid'
 
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
@@ -314,7 +252,7 @@ def main(args):
     conv3d_1 = model.stem[0]
     # features
     if config.dataset.features == 'ALL':
-        input_channels = 10
+        input_channels = 10 
     else:
         assert isinstance(config.dataset.features, list)
         input_channels = len(config.dataset.features)
@@ -413,10 +351,14 @@ def main(args):
                                                 is_train=False)
 
             if SAVE_MODEL and MAKE_LOGS:
-                if target_metric > target_metric_prev:
+                if not config.model.use_greedy_saving:
+                    print(f'SAVING...')
+                    save(experiment_dir, model, opt, epoch)
+                elif target_metric > target_metric_prev:
                     print(f'target_metric = {target_metric}, SAVING...')
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
+
 
     except Exception as e:
         set_trace()
