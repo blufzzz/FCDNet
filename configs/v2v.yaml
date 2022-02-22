@@ -1,10 +1,10 @@
+make_logs: true
 interpolate: true
 interpolation_size: [128, 128, 128] 
-make_logs: true
 silent: false
 
 opt:
-  device: 1
+  device: 0
   criterion: "Dice" 
  
   start_epoch: 0
@@ -15,30 +15,24 @@ opt:
   train_batch_size: 1
   val_batch_size: 1
 
-  lr: 0.001 # default - 0.0001 
+  lr: 0.001  
   save_model: true
 
 model:
   name: "v2v" 
   output_channels: 1 # FCD and background
-  max_channel_encoder_decoder: 128 # 
+  max_channel_encoder_decoder: 128 
   sigmoid: true
   normalization: 'group_norm'
-  # weights: 'logs/v2v_whole_BRATS-all_s128_bs1_GN_DICE_AUG@11.12.2021-02:13:57'
-  # weights: 'logs/v2v_whole_BRATS-all_s128_bs1_GN_DICE@10.12.2021-17:26:10/'
+  use_greedy_saving: false
+  target_metric_name: 'dice_score'
 
 dataset:
-  save_val_predictions: true
-  features: 'ALL'
   trim_background: true  
-  # root: '../fcd_data/normalized_tensors' 
-  # root: '../MICCAI_BraTS2020_TrainingData'
-  # root: '../fcd_data/patches_dataset_64_features'
-  # root: '../fcd_data/data_only_usefull_areas/full/' 
-  root: '/nfs/garfield/ibulygin/tensors_v2'
-  metadata_path: '/nfs/garfield/ibulygin/metadata_v2.npy'
-  # dataset_type: 'brats_interpolated'
+  features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'T2', 'CSF', 'GM', 'WM'] 
+  save_best_val_predictions: true
+  root: '/media/tom//ibulygin/fcd_data/tensors'
+  metadata_path: 'metadata/metadata_fcd.npy'
   dataset_type: 'interpolated'
-  # indexes_selected_root: '../fcd_data/indexes_selected_P0.9_L1250'
-  # dataset_type: 'patches'
-  # patch_size: 64
+
+  # dataset_type: 'brats_interpolated'

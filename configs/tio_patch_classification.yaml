@@ -1,7 +1,7 @@
-make_logs: false
+make_logs: true
 
 opt:
-  device: 0
+  device: 1
   criterion: "BCE"  
  
   start_epoch: 0
@@ -12,7 +12,7 @@ opt:
   train_batch_size: 1
   val_batch_size: 1
 
-  lr: 0.001 # default - 0.0001 
+  lr: 0.001
   save_model: true
   use_greedy_saving: false
   target_metric_name: 'dice_score'
@@ -22,15 +22,20 @@ model:
 
 dataset:
   trim_background: true  
-  features: 'ALL' 
-  # root: '/nfs/tom/ibulygin/MICCAI_BraTS2020_TrainingData' 
-  root: '/nfs/garfield/ibulygin/tensors_v2'
-  metadata_path: '/nfs/garfield/ibulygin/metadata_v2.npy'
-  dataset_type: 'patches_tio'
+  patch_overlap: 0.9 
+  
+  # features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'T2', 'CSF', 'GM', 'WM'] # FCD
+  # root: '/media/tom//ibulygin/fcd_data/tensors'
+  # dataset_type: 'patches_tio'
+
+  features: ['t1', 't1ce', 't2', 'flair'] # BRATS
+  root: '/media/tom/ibulygin/fcd_data/brats2020_tensors' 
+  dataset_type: 'brats_patches_tio'
+
   sampler_type: 'grid'
   patch_size : 32
   shuffle_train: false
-  patch_batch_size : 16
+  patch_batch_size : 64
   top_k_list: [10, 50, 100]
   patch_fcd_threshold: 0.5
   

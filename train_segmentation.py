@@ -1,30 +1,26 @@
 from tensorboardX import SummaryWriter  
 from IPython.core.debugger import set_trace
+import traceback
 from datetime import datetime
 import os
 import shutil
 import time
-import json
 from collections import defaultdict
 import pickle
 import numpy as np
-import pandas as pd
 import torch
 from torch import nn
 from torch import autograd
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from torch.nn.parallel import DistributedDataParallel
-from utils import trim, normalize, save, DiceScoreBinary, DiceLossBinary, parse_args, get_capacity
-from sklearn.metrics import accuracy_score, roc_auc_score
+from utils import save, DiceScoreBinary, DiceLossBinary, parse_args, get_capacity
 from models.v2v import V2VModel
 import torchio as tio
 from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
 from losses import focal_tversky_loss
-
 
 def one_epoch(model, 
                 criterion, 
@@ -42,11 +38,13 @@ def one_epoch(model,
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
     metric_dict = defaultdict(list)
+    target_metric_name = config.model.target_metric_name 
+
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
     with grad_context():
         iterator = enumerate(dataloader)
-
+        val_predictions = []
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
             
             if (augmentation is not None) and is_train:
@@ -73,22 +71,20 @@ def one_epoch(model,
 
             # forward pass
             label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
-
             loss = criterion(label_tensor_predicted, label_tensor)
 
             if is_train:
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
-            else:
-                if config.dataset.save_val_predictions:
-                    label = dataloader.dataset.labels[iter_i]
-                    torch.save(label_tensor_predicted.detach().cpu(),
-                                os.path.join(config.dataset.val_preds_path, f'{label}'))
-
+            
             metric_dict[f'{loss_name}'].append(loss.item())
-            dice_score = DiceScoreBinary(label_tensor_predicted*mask_tensor, label_tensor)
+            label_tensor_predicted = label_tensor_predicted*mask_tensor
+            dice_score = DiceScoreBinary(label_tensor_predicted, label_tensor)
             coverage = (label_tensor_predicted*label_tensor).sum() / label_tensor.sum()
+            
+            if not is_train:
+                val_predictions.append(label_tensor_predicted.detach().cpu().numpy())
             
             metric_dict['coverage'].append(coverage.item())
             metric_dict['dice_score'].append(dice_score.item())
@@ -101,18 +97,27 @@ def one_epoch(model,
 
             n_iters_total += 1
 
-    try:
-        target_metric = 0
-        for title, value in metric_dict.items():
-            m = np.mean(value)
-            metric_dict_epoch[phase_name + '_' + title].append(m)
-            if title=='dice_score': 
-                target_metric = m
-            if writer is not None:
-                writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
+    target_metric = 0
+    for title, value in metric_dict.items():
+        m = np.mean(value)
+        metric_dict_epoch[phase_name + '_' + title].append(m)
+        if title == target_metric_name:
+            target_metric = m
+        if writer is not None:
+            writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
 
-    except Exception as e:
-        print ('Exception:', str(e), 'Failed to save writer')
+    #####################
+    # SAVING BEST PREDS #
+    #####################
+    target_metrics_epoch = metric_dict_epoch[f'val_{target_metric_name}']
+    if not is_train:
+        if config.dataset.save_best_val_predictions:
+            if len(target_metrics_epoch) == 1 or target_metrics_epoch[-1] >= target_metrics_epoch[-2]:
+                for i,pred in enumerate(val_predictions):
+                        label = dataloader.dataset.labels[iter_i]
+                        torch.save(label_tensor_predicted,
+                                    os.path.join(config.dataset.val_preds_path, f'{label}'))
+
 
     return n_iters_total, target_metric
 
@@ -138,9 +143,10 @@ def main(args):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
         shutil.copy(args.config, os.path.join(experiment_dir, "config.yaml"))
-        if config.dataset.save_val_predictions:
-            val_preds_path = os.makedirs(os.path.join(experiment_dir, 'val_preds'))
+        if config.dataset.save_best_val_predictions:
+            val_preds_path = os.path.join(experiment_dir, 'best_val_preds')
             config.dataset.val_preds_path = val_preds_path
+            os.makedirs(val_preds_path)
 
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
     model = V2VModel(config).to(device)
@@ -152,9 +158,10 @@ def main(args):
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
         model.load_state_dict(model_dict['model_state'])
 
-    # setting datasets
+    ##################
+    # CREATE DATASETS #
+    ###################
     train_dataset, val_dataset = create_datasets(config)
-
     train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
     assert config.opt.train_batch_size == 1
@@ -176,27 +183,26 @@ def main(args):
         transform = tio.Compose([symmetry, bias, noise, affine, rescale]) # , affine
 
 
-    # setting model stuff
+    ################
+    # CREATE OPTIM #
+    ################
     criterion = {
         # "CE": torch.nn.CrossEntropyLoss(),
         "BCE":torch.nn.BCELoss(), # [probabilities, target]
         "Dice":DiceLossBinary,
         "FocalTversky":focal_tversky_loss(),
-        
     }[config.opt.criterion]
-
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
 
-    # training
+    ############
+    # TRAINING #
+    ############
     print('Start training!')
-
     metric_dict_epoch = defaultdict(list)
-    
     n_iters_total_train = 0 
     n_iters_total_val = 0
     target_metric = 0
     target_metric_prev = -1
-
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
             print (f'TRAIN EPOCH: {epoch} ... ')
@@ -228,12 +234,16 @@ def main(args):
                                             is_train=False)
 
             if SAVE_MODEL and MAKE_LOGS:
-                if target_metric > target_metric_prev:
+                if not config.model.use_greedy_saving:
+                    print(f'SAVING...')
+                    save(experiment_dir, model, opt, epoch)
+                elif target_metric > target_metric_prev:
                     print(f'target_metric = {target_metric}, SAVING...')
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
-
-    except:
+    except Exception as e:
+        print(traceback.format_exc())
+        set_trace()
         # keyboard interrupt
         if MAKE_LOGS:
             np.save(os.path.join(experiment_dir, 'metric_dict_epoch'), metric_dict_epoch)

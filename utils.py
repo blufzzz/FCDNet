@@ -6,7 +6,7 @@ from IPython.core.display import HTML
 import os
 import nibabel
 import argparse
-
+import re
 from celluloid import Camera
 import numpy as np
 from matplotlib import pyplot as plt
@@ -126,15 +126,17 @@ def trim(brain_tensor, label_tensor, mask_tensor=None):
 
 
 def create_dicts(root_label,
-                 feature_paths_templates, 
+                 feature_paths_templates,
+                 label_extractor, 
                  broken_labels=None):
 
     '''
     feature_paths_templates - dict; feature_type:template
+    label_extractor - extracts label unique for each subj
     t1:/sub-{label}/anat/
     '''
     
-    keys = [p.split('.')[0] for p in os.listdir(root_label)]
+    keys = [label_extractor(p) for p in os.listdir(root_label)]
     if broken_labels is not None:
         keys = set(keys)-set(broken_labels)
 
@@ -162,6 +164,10 @@ def normalize_(brain_tensor):
     return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
 
 def normalize(brain_tensor, mask=None):
+
+    ndim = len(brain_tensor.shape)
+
+    # if ndim == 4
     
     if mask is None:
         background = brain_tensor[0,0,0]

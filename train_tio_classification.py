@@ -1,20 +1,16 @@
-from __future__ import print_function
 from tensorboardX import SummaryWriter  
 from IPython.core.debugger import set_trace
+import traceback
 from datetime import datetime
 import os
 import shutil
-import time
 from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
 from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
-import pandas as pd
 import numpy as np
 from collections import defaultdict
-from matplotlib import pyplot as plt
 from tqdm import tqdm
-from joblib import Parallel, delayed
 import torch
 from torch import nn
 from torch import autograd
@@ -23,12 +19,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchio as tio
+from utils import get_capacity, save, DiceScoreBinary, parse_args
 
-from utils import get_capacity, normalize_, save, DiceScoreBinary, DiceLossBinary, parse_args
-from IPython.core.display import display, HTML
-
-from multiprocessing import cpu_count
-N_CPU = cpu_count()
 SEED = 42
 
 def one_epoch(model, 
@@ -52,12 +44,16 @@ def one_epoch(model,
     patch_batch_size = config.dataset.patch_batch_size
     batch_size = config.opt.train_batch_size if is_train else config.opt.val_batch_size
     classification_threshold = config.model.classification_threshold
-    sampler_type = config.dataset.sampler_type
     patch_fcd_threshold = config.dataset.patch_fcd_threshold 
     labels = dataloader.dataset.labels
-    shuffle_train = config.dataset.shuffle_train if hasattr(config.dataset,'shuffle_train') else True
+    patch_overlap = config.dataset.patch_overlap
     top_k_list = config.dataset.top_k_list if hasattr(config.dataset, 'top_k_list') else [10, 50, 100]
     assert isinstance(top_k_list, list)
+    assert batch_size == 1
+
+    pov = int(patch_size*patch_overlap) # take high overlap to avoid missing
+    if pov%2!=0:
+        pov+=1
 
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
@@ -68,15 +64,20 @@ def one_epoch(model,
         # brain_tensor - [1,C,H,W,D]
         # mask_tensor - [1,1,H,W,D]
         # label_tensor - [1,1,H,W,D]
+        #######################
+        # ITERATE OVER BRAINS #
+        #######################
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
-
-            if label_tensor.sum() == 0:
-                continue
 
             ###########################
             # SETUP PATCH DATALOADERS #
             ###########################
             label = labels[iter_i]
+
+            if label_tensor.sum() == 0:
+                print(f'No label for {label}, skipping...')
+                continue
+
             n_fcd = label_tensor.sum()
             subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
                           label=tio.LabelMap(tensor=label_tensor[0]),
@@ -85,16 +86,16 @@ def one_epoch(model,
             if is_train and (augmentation is not None):
                 subject = augmentation(subject)
 
-            patch_overlap = int(patch_size*0.9)
-            grid_sampler = tio.inference.GridSampler(subject, patch_size, patch_overlap)
+            
 
+            grid_sampler = tio.inference.GridSampler(subject, patch_size, pov)
             patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
             aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
 
             ########################
             # ITERATE OVER PATCHES #
             #############################################################################
-            # number of FCD pixels in patch to be considered as FCD patch
+            # number of FCD pixels in patch to be considered as target patch
             metric_dict_patch = defaultdict(list)
             targets_all = []
             probs_all = []
@@ -106,7 +107,9 @@ def one_epoch(model,
                 targets = patches_batch['label'][tio.DATA].to(device) # [bs,1,p,p,p]
                 n_fcd = patches_batch['n_fcd'].to(device).unsqueeze(1)
                 
+                # it is target crop if there is enough pixels percentage of the target
                 targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
+                # it is target crop if there is enough pixels in patch
                 targets_ += (targets.sum([-1,-2,-3]) / (patch_size**3)) >= patch_fcd_threshold
                 targets_ = targets_.type(torch.float32)
 
@@ -119,9 +122,10 @@ def one_epoch(model,
                     opt.step()
 
                 locations = patches_batch[tio.LOCATION]
+
                 # casting back to patch
                 outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
-                aggregator.add_batch(outputs, locations)
+                aggregator.add_batch(outputs.detach(), locations)
 
                 #####################
                 # per-PATCH METRICS #
@@ -142,7 +146,8 @@ def one_epoch(model,
             metric_dict['class_balance'].append(class_balance)
             print(f'Class_balance for {label} is {class_balance}!')
             if class_balance == 0:
-                set_trace()
+                print('Skipping!')
+                continue
 
             for k,v in metric_dict_patch.items():
                 metric_dict[k].append(np.mean(v))
@@ -154,14 +159,14 @@ def one_epoch(model,
             accuracy = accuracy_score(targets_all, preds_all)
             precision = precision_score(targets_all, preds_all, zero_division=0)
             recall = recall_score(targets_all, preds_all, zero_division=0)
-            roc_auc = roc_auc_score(targets_all, probs_all)
+            roc_auc = roc_auc_score(targets_all, probs_all, average='samples')
             f1 = f1_score(targets_all, preds_all, average='weighted')
 
             metric_dict['accuracy'].append(accuracy)
             metric_dict['precision'].append(precision)
             metric_dict['recall'].append(recall)
-            metric_dict['roc_auc'].append(roc_auc)
-            metric_dict['f1'].append(f1)
+            metric_dict['roc_auc_samples'].append(roc_auc)
+            metric_dict['f1_weighted'].append(f1)
 
             ###########
             # HITRATE #
@@ -170,7 +175,7 @@ def one_epoch(model,
             argsort = np.argsort(probs_all, axis=0)[::-1]
             for top_k in top_k_list:
                 top_k_fcd = targets_all[argsort][:top_k]
-                hitrate = top_k_fcd.mean() #((1./(np.arange(top_k)+1))*top_k_fcd).sum() 
+                hitrate = top_k_fcd.mean()
                 metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
 
             ########
@@ -197,8 +202,6 @@ def one_epoch(model,
                     writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
 
             n_iters_total += 1
-
-            break
 
     ###################
     # PER-EPOCH STATS #
@@ -233,6 +236,7 @@ def main(args):
     assert config.opt.val_batch_size == 1
     assert config.opt.train_batch_size == 1
     assert config.dataset.sampler_type == 'grid'
+    assert config.dataset.shuffle_train == False
 
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
@@ -250,13 +254,7 @@ def main(args):
     ################
     model = torchvision.models.video.r3d_18(pretrained=False, progress=False)
     conv3d_1 = model.stem[0]
-    # features
-    if config.dataset.features == 'ALL':
-        input_channels = 10 
-    else:
-        assert isinstance(config.dataset.features, list)
-        input_channels = len(config.dataset.features)
-
+    input_channels = len(config.dataset.features)
     model.stem[0] = nn.Conv3d(in_channels=input_channels,
                              out_channels=conv3d_1.out_channels,
                              kernel_size=conv3d_1.kernel_size,
@@ -277,7 +275,7 @@ def main(args):
     ###################
     train_dataset, val_dataset = create_datasets(config)
     collate_fn = None
-    shuffle_train = config.dataset.shuffle_train if hasattr(config.dataset,'shuffle_train') else True
+    
     train_dataloader = DataLoader(train_dataset,
                                     batch_size=config.opt.train_batch_size,
                                     shuffle=shuffle_train,
@@ -361,6 +359,7 @@ def main(args):
 
 
     except Exception as e:
+        print(traceback.format_exc())
         set_trace()
         # keyboard interrupt
         if MAKE_LOGS:
