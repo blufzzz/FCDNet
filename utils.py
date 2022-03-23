@@ -247,29 +247,12 @@ def DiceScoreBinary(input,
     target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
     '''
 
-    # create "background" class
+    target = target.squeeze(1) # squeeze channel 
+    input = input.squeeze(1) # squeeze channel
     
-    if include_backgroud:
-        target_float = target.type(input.dtype)
-        background_tensor = torch.abs(target_float - 1.)
-        target_stacked = torch.cat([background_tensor, target_float], dim=1) # [bs,2,ps,ps,ps]
-        input_stacked = torch.cat([1-input, input], dim=1) # [bs,2,ps,ps,ps]
-        
-        intersection = torch.sum(input_stacked * target_stacked, dim=(2,3,4)) # [bs,2]
-        cardinality = torch.sum(torch.pow(input_stacked,2) + torch.pow(target_stacked,2), dim=(2,3,4)) # [bs,2]
-        dice_score = 2. * intersection / (cardinality + 1e-7) # [bs,2]
-        
-        if weights is not None:
-            dice_score = (dice_score*weights).sum(1)
-        
-    else:
-
-        target = target.squeeze(1) # cast to float and squeeze channel # .type(input.dtype)
-        input = input.squeeze(1) # squeeze channel
-        
-        intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
-        cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
-        dice_score = 2. * intersection / (cardinality + 1e-7)
+    intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
+    cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
+    dice_score = 2. * intersection / (cardinality + 1e-7)
 
     return dice_score.mean()
 

@@ -158,7 +158,7 @@ class V2VModel(nn.Module):
 
         self.sigmoid = config.model.sigmoid
         # geom features
-        input_channels = 10 if config.dataset.features == 'ALL' else len(config.dataset.features)
+        input_channels = len(config.dataset.features)
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
 

@@ -44,9 +44,10 @@ def one_epoch(model,
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
     with grad_context():
         iterator = enumerate(dataloader)
-        val_predictions = []
+        val_predictions = {}
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
             
+
             if (augmentation is not None) and is_train:
                 subject = tio.Subject(
                     t1=tio.ScalarImage(tensor=brain_tensor[0]),
@@ -84,7 +85,8 @@ def one_epoch(model,
             coverage = (label_tensor_predicted*label_tensor).sum() / label_tensor.sum()
             
             if not is_train:
-                val_predictions.append(label_tensor_predicted.detach().cpu().numpy())
+                label = dataloader.dataset.labels[iter_i]
+                val_predictions[label] = label_tensor_predicted.detach().cpu().numpy()
             
             metric_dict['coverage'].append(coverage.item())
             metric_dict['dice_score'].append(dice_score.item())
@@ -113,9 +115,8 @@ def one_epoch(model,
     if not is_train:
         if config.dataset.save_best_val_predictions:
             if len(target_metrics_epoch) == 1 or target_metrics_epoch[-1] >= target_metrics_epoch[-2]:
-                for i,pred in enumerate(val_predictions):
-                        label = dataloader.dataset.labels[iter_i]
-                        torch.save(label_tensor_predicted,
+                for label, pred in val_predictions.items():
+                        torch.save(pred,
                                     os.path.join(config.dataset.val_preds_path, f'{label}'))
 
 

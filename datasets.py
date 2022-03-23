@@ -161,7 +161,7 @@ class Brats2020Dataset(Dataset):
         self.metadata = np.load('metadata/metadata_brats2020.npy',allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
         self.labels = self.metadata[metadata_key]
-        self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]
+        self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]#[:1]
         self.features = config.features
 
     def __getitem__(self, idx):

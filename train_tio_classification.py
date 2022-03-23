@@ -19,7 +19,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchio as tio
-from utils import get_capacity, save, DiceScoreBinary, parse_args
+from utils import get_capacity, save, DiceScoreBinary, DiceLossBinary, parse_args
+from models.v2v import V2VModel
 
 SEED = 42
 
@@ -85,7 +86,6 @@ def one_epoch(model,
             
             if is_train and (augmentation is not None):
                 subject = augmentation(subject)
-
             
 
             grid_sampler = tio.inference.GridSampler(subject, patch_size, pov)
@@ -107,11 +107,14 @@ def one_epoch(model,
                 targets = patches_batch['label'][tio.DATA].to(device) # [bs,1,p,p,p]
                 n_fcd = patches_batch['n_fcd'].to(device).unsqueeze(1)
                 
-                # it is target crop if there is enough pixels percentage of the target
-                targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
-                # it is target crop if there is enough pixels in patch
-                targets_ += (targets.sum([-1,-2,-3]) / (patch_size**3)) >= patch_fcd_threshold
-                targets_ = targets_.type(torch.float32)
+                if config.model.type == 'clf':
+                    # it is target crop if there is enough pixels percentage of the target
+                    targets_ = (targets.sum([-1,-2,-3]) / n_fcd) >= patch_fcd_threshold
+                    # it is target crop if there is enough pixels in patch
+                    targets_ += (targets.sum([-1,-2,-3]) / (patch_size**3)) >= patch_fcd_threshold
+                    targets_ = targets_.type(torch.float32)
+                else:
+                    targets_ = targets
 
                 logits = model(inputs)
                 loss = criterion(logits, targets_) # [bs,1], [bs,1]
@@ -124,7 +127,10 @@ def one_epoch(model,
                 locations = patches_batch[tio.LOCATION]
 
                 # casting back to patch
-                outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
+                if config.model.type == 'clf':
+                    outputs = torch.ones_like(targets)*logits[...,None,None,None].sigmoid() # [bs,1,p,p,p]
+                else:
+                    outputs = logits
                 aggregator.add_batch(outputs.detach(), locations)
 
                 #####################
@@ -201,6 +207,19 @@ def one_epoch(model,
                 for title, value in metric_dict.items():
                     writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
 
+            #####################
+            # SAVING BEST PREDS #
+            #####################
+            # target_metrics_epoch = metric_dict_epoch[f'val_{target_metric_name}']
+            # if not is_train:
+            #     if config.dataset.save_best_val_predictions:
+            #         if len(target_metrics_epoch) == 1 or target_metrics_epoch[-1] >= target_metrics_epoch[-2]:
+            #             for i,pred in enumerate(val_predictions):
+            #                     label = dataloader.dataset.labels[iter_i]
+            #                     torch.save(label_tensor_predicted,
+            #                                 os.path.join(config.dataset.val_preds_path, f'{label}'))
+
+
             n_iters_total += 1
 
     ###################
@@ -212,7 +231,7 @@ def one_epoch(model,
         metric_dict_epoch[phase_name + '_' + title].append(m)
         if writer is not None:
             writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
-        if title == config.opt.target_metric_name:
+        if title == config.model.target_metric_name:
             target_metric = m
         else:
             print('No target metric was found!')
@@ -247,23 +266,34 @@ def main(args):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
         shutil.copy(args.config, os.path.join(experiment_dir, "config.yaml"))
+        if not hasattr(config.model, 'use_greedy_saving'):
+            config.model.use_greedy_saving = False
     writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
 
     ################
     # CREATE MODEL #
     ################
-    model = torchvision.models.video.r3d_18(pretrained=False, progress=False)
-    conv3d_1 = model.stem[0]
-    input_channels = len(config.dataset.features)
-    model.stem[0] = nn.Conv3d(in_channels=input_channels,
-                             out_channels=conv3d_1.out_channels,
-                             kernel_size=conv3d_1.kernel_size,
-                             padding=conv3d_1.padding,
-                             bias=conv3d_1.bias)
-    model.fc = nn.Linear(model.fc.in_features, 1)
-    model = model.to(device)
-    model_capacity = get_capacity(model)
-    print(f'Model created! Capacity: {model_capacity}')
+    if config.model.type == 'clf':
+        model = torchvision.models.video.r3d_18(pretrained=False, progress=False)
+        conv3d_1 = model.stem[0]
+        input_channels = len(config.dataset.features)
+        model.stem[0] = nn.Conv3d(in_channels=input_channels,
+                                 out_channels=conv3d_1.out_channels,
+                                 kernel_size=conv3d_1.kernel_size,
+                                 padding=conv3d_1.padding,
+                                 bias=conv3d_1.bias)
+        model.fc = nn.Linear(model.fc.in_features, 1)
+        model = model.to(device)
+
+    elif config.model.type == 'seg':
+        model = V2VModel(config).to(device)
+
+    else:
+        raise RuntimeError('Unknown model type!')
+
+
+        model_capacity = get_capacity(model)
+        print(f'Model created! Capacity: {model_capacity}')
 
     if hasattr(config.model, 'weights'):
         model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
@@ -369,3 +399,7 @@ if __name__ == '__main__':
     args = parse_args()
     main(args)
     
+
+
+
+# n_iters_total_train, _  = one_epoch(model, criterion, opt, config, train_dataloader, device, writer, epoch, metric_dict_epoch, n_iters_total_train, augmentation=augmentation, is_train=True)
