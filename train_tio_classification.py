@@ -117,7 +117,12 @@ def one_epoch(model,
                     targets_ = targets
 
                 logits = model(inputs)
-                loss = criterion(logits, targets_) # [bs,1], [bs,1]
+
+
+                
+
+
+                # loss = criterion(logits, targets_) # [bs,1], [bs,1]
                 
                 if is_train:
                     opt.zero_grad()

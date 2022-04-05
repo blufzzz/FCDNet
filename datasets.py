@@ -158,7 +158,9 @@ class Brats2020Dataset(Dataset):
         self.train = train
         self.trim_background = config.trim_background
         self.features = ['t1', 't1ce', 't2', 'flair']
-        self.metadata = np.load('metadata/metadata_brats2020.npy',allow_pickle=True).item()
+        self.metadata_path = config.metadata_path
+
+        self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
         self.labels = self.metadata[metadata_key]
         self.paths = [os.path.join(self.root, f'tensor_{k}') for k in self.labels]#[:1]
@@ -193,8 +195,9 @@ class BrainMaskDataset(Dataset):
         self.root = config.root
         self.train = train
         self.trim_background = config.trim_background
+        self.metadata_path = config.metadata_path
 
-        self.metadata = np.load('metadata/metadata_fcd.npy',allow_pickle=True).item()
+        self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
         self.labels = self.metadata[metadata_key]
 
@@ -203,7 +206,11 @@ class BrainMaskDataset(Dataset):
 
     def __getitem__(self, idx):
 
-        tensor_dict = torch.load(self.paths[idx])
+        try:
+            tensor_dict = torch.load(self.paths[idx])
+        except:
+            set_trace()
+            
         label_tensor_torch = tensor_dict['label']
         mask_tensor_torch = None
         if 'mask' in tensor_dict.keys():

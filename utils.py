@@ -142,15 +142,28 @@ def create_dicts(root_label,
 
     paths_dict = defaultdict(dict)
     for label in keys:
-        for feature_type, template in feature_paths_templates.items():
-            
-            path = template.replace('{label}', label)
-            
-            # no such path
-            try:
-                path = glob.glob(path, recursive=True)[0]
-            except:
-                print(f'No {feature_type} for {label}')
+        for feature_type, templates in feature_paths_templates.items():
+
+            if not isinstance(templates, list):
+                templates = [templates]
+
+            path = None
+            # try to find feature...
+            for template in templates:
+                paths = glob.glob(template.replace('{label}', label), recursive=True)
+
+                if len(paths) == 0: 
+                    continue # invalid template!
+                else:
+                    path = paths[0]
+                    if not os.path.isfile(path):
+                        path = None 
+                    else:
+                        # we found feature!
+                        break
+                            
+            if path is None:
+                print(f'No {feature_type} for {label}') # incomplete features set 
                 if label in paths_dict.keys():
                     paths_dict.pop(label)
                 break
@@ -250,14 +263,17 @@ def DiceScoreBinary(input,
     target = target.squeeze(1) # squeeze channel 
     input = input.squeeze(1) # squeeze channel
     
-    intersection = torch.sum(input * target, dim=(1,2,3)) # [bs,]
-    cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) # [bs,]
-    dice_score = 2. * intersection / (cardinality + 1e-7)
+    intersection = 2*torch.sum(input * target, dim=(1,2,3)) + 1 # [bs,]
+    cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) + 1 # [bs,]
+    dice_score = intersection / cardinality
 
     return dice_score.mean()
 
 
 def DiceLossBinary(*args, **kwargs):
+    '''
+    input, target - [bs,1,H,W,D]
+    '''
     return 1 - DiceScoreBinary(*args, **kwargs)
 
 

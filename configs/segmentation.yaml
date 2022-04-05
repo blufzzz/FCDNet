@@ -5,12 +5,13 @@ silent: false
 
 opt:
   device: 1
-  criterion: "Dice" 
+  criterion: "DiceBCE" # "Dice" 
+  bce_weights: 250
  
   start_epoch: 0
   n_epochs: 9999
 
-  augmentation: false
+  augmentation: true
 
   train_batch_size: 1
   val_batch_size: 1
@@ -28,9 +29,12 @@ model:
   target_metric_name: 'dice_score'
 
 dataset:
-  trim_background: true  
-  features: ['sulc'] #['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'T2', 'CSF', 'GM', 'WM'] 
   save_best_val_predictions: true
-  root: '/nfs/tom//ibulygin/fcd_data/tensors'
+  trim_background: true  
+  features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
+  root: '/nfs/tom/ibulygin/fcd_data/tensors_MNI152'
+  
+  # metadata_path: 'metadata/metadata_fcd_nG.npy'
+  # root: '/nfs/tom/ibulygin/fcd_data/tensors_orig'
   metadata_path: 'metadata/metadata_fcd.npy'
   dataset_type: 'interpolated'

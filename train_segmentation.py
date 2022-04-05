@@ -70,9 +70,22 @@ def one_epoch(model,
                 label_tensor = label_tensor.to(device)
                 mask_tensor = mask_tensor.to(device)
 
+
             # forward pass
             label_tensor_predicted = model(brain_tensor) # [bs,1,ps,ps,ps]
-            loss = criterion(label_tensor_predicted, label_tensor)
+            
+            if config.opt.criterion == "BCE":
+                weights = torch.ones(label_tensor.shape).to(device)
+                weights[label_tensor > 0] = config.opt.bce_weights   #250
+                loss = criterion(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor)
+            elif config.opt.criterion == "DiceBCE":
+                weights = torch.ones(label_tensor.shape).to(device)
+                weights[label_tensor > 0] = config.opt.bce_weights   #250
+                loss = torch.nn.BCELoss(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor) + \
+                        DiceLossBinary(label_tensor_predicted, label_tensor)
+            else:
+                loss = criterion(label_tensor_predicted, label_tensor) 
+
 
             if is_train:
                 opt.zero_grad()
@@ -172,16 +185,16 @@ def main(args):
 
     transform = None
     if config.opt.augmentation:
-        symmetry = tio.RandomFlip(axes=0)
-        bias = tio.RandomBiasField(coefficients=0.3)
+        symmetry = tio.RandomFlip(axes=0) 
         noise = tio.RandomNoise(std=(0,1e-3))
-        affine = tio.RandomAffine(scales=(0.9, 1.1, 0.9, 1.1, 0.9, 1.1), 
-                                 degrees=5,
+        blur = tio.RandomBlur((0,1e-1))
+        affine = tio.RandomAffine(scales=(0.95, 1.05, 0.95, 1.05, 0.95, 1.05), 
+                                 degrees=3,
                                  translation=(1,1,1),
                                  center='image',
                                  default_pad_value=0)
         rescale = tio.RescaleIntensity(out_min_max=(0, 1))
-        transform = tio.Compose([symmetry, bias, noise, affine, rescale]) # , affine
+        transform = tio.Compose([symmetry, blur, noise, affine, rescale])
 
 
     ################
@@ -189,11 +202,14 @@ def main(args):
     ################
     criterion = {
         # "CE": torch.nn.CrossEntropyLoss(),
-        "BCE":torch.nn.BCELoss(), # [probabilities, target]
+        "BCE":torch.nn.BCELoss, # [probabilities, target]
         "Dice":DiceLossBinary,
+        "DiceBCE":None,
         "FocalTversky":focal_tversky_loss(),
     }[config.opt.criterion]
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
+
+
 
     ############
     # TRAINING #

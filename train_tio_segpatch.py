@@ -47,7 +47,7 @@ def one_epoch(model,
     labels = dataloader.dataset.labels
     patch_overlap = config.dataset.patch_overlap
     assert batch_size == 1
-    val_predictions = []
+    val_predictions = {}
     target_metric_name = config.model.target_metric_name if hasattr(config.model,'target_metric_name') else 'dice'
 
     pov = int(patch_size*patch_overlap) # take high overlap to avoid missing
@@ -67,9 +67,6 @@ def one_epoch(model,
         #######################
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in enumerate(dataloader):
 
-            if iter_i > 0:
-                break
-
             ###########################
             # SETUP PATCH DATALOADERS #
             ###########################
@@ -85,9 +82,10 @@ def one_epoch(model,
             
             if is_train and (augmentation is not None):
                 subject = augmentation(subject)
+                # make 0 background
             
             grid_sampler = tio.inference.GridSampler(subject, patch_size, pov)
-            patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size)
+            patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size, shuffle=True)
             aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
 
             ########################
@@ -102,7 +100,20 @@ def one_epoch(model,
                 targets = patches_batch['label'][tio.DATA].to(device) # [bs,1,p,p,p]
 
                 logits = model(inputs)
-                loss = criterion(logits, targets) # [bs,1,p,p,p], [bs,1,p,p,p]
+
+                if config.opt.criterion == "BCE":
+                    weights = torch.ones(targets.shape).to(device)
+                    weights[targets > 0] = config.opt.bce_weights   #250
+                    loss = criterion(weight=weights, reduction='mean')(logits, targets)
+                elif config.opt.criterion == "DiceBCE":
+                    weights = torch.ones(targets.shape).to(device)
+                    weights[targets > 0] = config.opt.bce_weights   #250
+                    loss = torch.nn.BCELoss(weight=weights, reduction='mean')(logits, targets) + \
+                            DiceLossBinary(logits, targets)
+                else:
+                    loss = criterion(logits, targets) # [bs,1,p,p,p], [bs,1,p,p,p]
+
+
                 
                 if is_train:
                     opt.zero_grad()
@@ -133,7 +144,7 @@ def one_epoch(model,
             metric_dict['dice_score'].append(dice)
             metric_dict['coverage'].append(coverage.item())
             if not is_train:
-                val_predictions.append(output_tensor.detach().cpu().numpy())
+                val_predictions[label] = output_tensor.detach().cpu().numpy()
 
             #########
             # PRINT #
@@ -169,8 +180,7 @@ def one_epoch(model,
     if not is_train:
         if config.dataset.save_best_val_predictions:
             if len(target_metrics_epoch) == 1 or target_metrics_epoch[-1] >= target_metrics_epoch[-2]:
-                for i,pred in enumerate(val_predictions):
-                        label = labels[i]
+                for label,pred in val_predictions.items():
                         torch.save(pred,
                                     os.path.join(config.dataset.val_preds_path, f'{label}'))
 
@@ -243,7 +253,7 @@ def main(args):
     augmentation = None
     if config.opt.augmentation:
         symmetry = tio.RandomFlip(axes=0) 
-        bias = tio.RandomBiasField(coefficients=0.3)
+        bias = tio.RandomBiasField(coefficients=0.1)
         noise = tio.RandomNoise(std=(0,1e-3))
         affine = tio.RandomAffine(scales=(0.9, 1.1, 0.9, 1.1, 0.9, 1.1), 
                                  degrees=5,
@@ -258,6 +268,8 @@ def main(args):
     ################
     criterion = {
         "Dice": DiceLossBinary, 
+        "BCE": nn.BCELoss,
+        "DiceBCE":None
     }[config.opt.criterion] 
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
 
@@ -285,19 +297,19 @@ def main(args):
                                             n_iters_total_train,
                                             augmentation=augmentation,
                                             is_train=True)
-            # print (f'VAL EPOCH: {epoch} ... ')
-            # n_iters_total_val, target_metric = one_epoch(model, 
-            #                                     criterion, 
-            #                                     opt, 
-            #                                     config, 
-            #                                     val_dataloader, 
-            #                                     device, 
-            #                                     writer, 
-            #                                     epoch, 
-            #                                     metric_dict_epoch, 
-            #                                     n_iters_total_val,
-            #                                     augmentation=None,
-            #                                     is_train=False)
+            print (f'VAL EPOCH: {epoch} ... ')
+            n_iters_total_val, target_metric = one_epoch(model, 
+                                                criterion, 
+                                                opt, 
+                                                config, 
+                                                val_dataloader, 
+                                                device, 
+                                                writer, 
+                                                epoch, 
+                                                metric_dict_epoch, 
+                                                n_iters_total_val,
+                                                augmentation=None,
+                                                is_train=False)
 
             if SAVE_MODEL and MAKE_LOGS:
                 if not config.model.use_greedy_saving:

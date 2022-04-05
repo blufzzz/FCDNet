@@ -1,0 +1,45 @@
+make_logs: true
+
+opt:
+  device: 3
+  criterion: "DiceBCE" # "Dice" 
+  bce_weights: 250
+ 
+  start_epoch: 0
+  n_epochs: 9999
+
+  augmentation: true #true
+
+  train_batch_size: 1
+  val_batch_size: 1
+
+  lr: 0.001
+  save_model: true
+ 
+model:
+  name: "v2v" 
+  output_channels: 1 
+  max_channel_encoder_decoder: 256 
+  sigmoid: true
+  normalization: 'group_norm'
+  use_greedy_saving: false
+  target_metric_name: 'dice_score'
+
+dataset:
+  save_best_val_predictions: true
+  trim_background: true  
+  patch_overlap: 0.8 
+  
+  features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
+  root: '/nfs/tom/ibulygin/fcd_data/tensors_MNI152'
+  metadata_path: 'metadata/metadata_fcd.npy'
+  dataset_type: 'patches_tio'
+
+  # features: ['t1', 't1ce', 't2', 'flair'] # BRATS
+  # root: '/media/tom/ibulygin/fcd_data/brats2020_tensors' 
+  # dataset_type: 'brats_patches_tio'
+  sampler_type: 'grid'
+  patch_size : 64
+  shuffle_train: true
+  patch_batch_size : 4
+  
