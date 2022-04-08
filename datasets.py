@@ -1,154 +1,111 @@
-from tensorboardX import SummaryWriter  
 from IPython.core.debugger import set_trace
-from datetime import datetime
 import os
-import shutil
-import argparse
-import time
-import json
-from collections import defaultdict
-import pickle
 import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch import autograd
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from torch.nn.parallel import DistributedDataParallel
-from utils import trim, normalize, normalize_
-from sklearn.metrics import accuracy_score, roc_auc_score
-from models.v2v import V2VModel
-import nibabel
-import yaml
-from tqdm import tqdm
-from easydict import EasyDict as edict
+from torch.utils.data import Dataset
+from utils import trim, normalize
+from torchsample import StratifiedSampler
 
 
 def create_datasets(config):
 
-    if config.dataset.dataset_type == 'interpolated': 
+    if config.dataset.dataset_type == 'fcd': 
         train_dataset = BrainMaskDataset(config.dataset, train=True)
         val_dataset = BrainMaskDataset(config.dataset, train=False)
-    elif config.dataset.dataset_type == 'brats_interpolated': 
+    elif config.dataset.dataset_type == 'brats': 
         train_dataset = Brats2020Dataset(config.dataset, train=True)
         val_dataset = Brats2020Dataset(config.dataset, train=False)
-    elif config.dataset.dataset_type == 'brats_patches_tio': 
-        train_dataset = Brats2020Dataset(config.dataset, train=True)
-        val_dataset = Brats2020Dataset(config.dataset, train=False)
-    elif config.dataset.dataset_type == 'patches_tio':
-        train_dataset = BrainMaskDataset(config.dataset, train=True)
-        val_dataset = BrainMaskDataset(config.dataset, train=False)
-    elif config.dataset.dataset_type == 'patches_prec':
-        train_dataset = PatchesDataset(config.dataset, train=True)
-        val_dataset = BrainMaskDataset(config.dataset, train=False)    
     else:
         raise RuntimeError('Wrond `dataset_type`!')
     return train_dataset, val_dataset
 
 
-class PatchesDataset(Dataset):
+class BrainPatchesDataset(Dataset):
 
-    def __init__(self, config, force_rebuild=False, train=True):
+    def __init__(self, brain, mask, label, coords, target, patch_size):
         
-        self.root = config.root
-        self.train = train
-        self.features = config.features
-        self.patch_size = config.patch_size
-        self.fcd_threshold = config.fcd_threshold
-        self.metadata_path = 'metadata/metadata_fcd.npy'
-        self.patch_dataframe_path = config.patch_dataframe_path
-        self.patches_dataframes_merged_path = config.patches_dataframes_merged_path 
-        self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
-        metadata_key = 'train' if self.train else 'test'
-        self.labels = self.metadata[metadata_key]
-        self.make_balanced_resampling = config.make_balanced_resampling
-        self.force_rebuild = force_rebuild
-
-        dataset_title = f'ps{self.patch_size}_fcd{self.fcd_threshold}'
-        if self.make_balanced_resampling:
-            dataset_title += '_balanced_resampling'
-
-        df_path = os.path.join(self.patches_dataframes_merged_path, dataset_title)
-
-        if self.force_rebuild or not os.path.isfile(df_path):
-            df_s = []
-            print('Creating patches dataframe for train dataset...')
-            for k in tqdm(self.labels):
-                df_label = f'label-{k}_ps{self.patch_size}_notrim'
-                path = os.path.join(self.patch_dataframe_path, df_label)
-                df_s.append(self.process_df(pd.read_csv(path, index_col=0)))
-            self.df = pd.concat(df_s)
-            del df_s
-            print('Merged df created and saved to', df_path)
-            self.df.to_csv(df_path)
-
-        else:
-            print('Reading pre-calculated dataframe from', df_path)
-            self.df = pd.read_csv(df_path, 
-                                  index_col=0,
-                                  dtype={'x':int,'y':int,'z':int,
-                                  'label':str,
-                                  'target':int})
-
-        print('Dataframe created, Class balance:', self.df['target'].sum()/self.df.shape[0])
-
-    def balanced_resampling(self, df):
-        # print('Rebalancing, orig shape:', df.shape)
-        target_ind = np.array(df.query('target==1').index.tolist())
-        non_target_ind = df.query('target!=1').index
-        non_target_ind_sample = np.random.choice(non_target_ind, size=len(target_ind), replace=False)
-        new_indexes = np.concatenate([target_ind,non_target_ind_sample])
-        new_indexes = pd.core.indexes.numeric.Int64Index(data=new_indexes)
-        df_resampled = df.loc[new_indexes]
-        return df_resampled
+        self.brain = brain
+        self.mask = mask
+        self.label = label
+        self.coords  = coords
+        self.target = target
+        self.patch_size = patch_size
         
-    def process_df(self, df):
-            
-        df['fcd_percentage'] = df['n_label'] / df['n_fcd']
-        df['target'] = (df['fcd_percentage'] >= self.fcd_threshold).astype(int)
-        drop_index = df.query(f"fcd_percentage>0 & fcd_percentage<{self.fcd_threshold}").index
-        df.drop(index=drop_index, inplace=True)
-        if self.make_balanced_resampling:
-            df = self.balanced_resampling(df)
-        return df[['x','y','z', 'label', 'target']]
-
     def __getitem__(self, idx):
 
-        # if self.make_balanced_resampling:
-        #     info = self.df_resampled.iloc[idx]
-        # else:
-        info = self.df.iloc[idx]
-        x = info.x
-        y = info.y
-        z = info.z
-        label = info.label
-        target = torch.tensor([info.target])
-        
-        tensor_path = os.path.join(self.root, f'tensor_{label}')
-        tensor_dict = torch.load(tensor_path)
-        label_tensor_torch = tensor_dict['label']
-        
-        mask_tensor_torch = None
-        if 'mask' in tensor_dict.keys():
-            mask_tensor_torch = tensor_dict['mask']
-        
-        features = sorted(set(self.features) - {'label', 'mask'})
-        
-        brain_tensor_torch = torch.stack([tensor_dict[f] for f in self.features], dim=0)
+        x,y,z = self.coords[idx]
         
         pd = self.patch_size//2
         x1,x2 = x-pd,x+pd 
         y1,y2 = y-pd,y+pd
         z1,z2 = z-pd,z+pd
         
-        patch = brain_tensor_torch[:,x1:x2,y1:y2,z1:z2]
+        patch = self.brain[:,x1:x2,y1:y2,z1:z2]
+        target = self.label[:,x1:x2,y1:y2,z1:z2]
         
         return patch, target
 
     def __len__(self):
-        return self.df.shape[0]
+        return len(self.target)
+
+
+
+def BalancedSampler(subject, patch_size, patches_per_brain, patch_batch_size, label_ratio):
+
+    
+    brain, mask, label = subject['t1'].tensor, subject['mask'].tensor, subject['label'].tensor
+
+    ps = (patch_size//2) + 1
+    padding = (ps,ps, ps,ps, ps,ps, 0,0)
+    brain = F.pad(brain, padding, "constant", 0)
+    mask = F.pad(mask, padding, "constant", 0)
+    label = F.pad(label, padding, "constant", 0)
+
+    X,Y,Z = label.shape[-3:]
+
+    neg_sample_mask = ((label[0] == 0)*mask[0]).type(torch.bool)
+    pos_sample_mask = (label[0]).type(torch.bool)
+
+    xyz_grid = torch.tensor(np.stack(np.meshgrid(np.arange(X), np.arange(Y), np.arange(Z), indexing='ij'), -1))
+
+    neg_coords = xyz_grid[neg_sample_mask]
+    pos_coords = xyz_grid[pos_sample_mask]
+
+    N_neg = len(neg_coords)
+    N_pos = len(pos_coords)
+
+    neg_index = np.arange(N_neg)
+    pos_index = np.arange(N_pos)
+
+    N_neg_subsample = int((1-label_ratio)*patches_per_brain)
+    N_pos_subsample = int(label_ratio*patches_per_brain)
+
+    # random balanced subsample
+    neg_index_subsample = np.random.choice(neg_index, size=N_neg_subsample)
+    pos_index_subsample = np.random.choice(pos_index, size=N_pos_subsample)
+
+    neg_coords_subsample = neg_coords[neg_index_subsample]
+    pos_coords_subsample = pos_coords[pos_index_subsample]
+
+    y = torch.cat([torch.zeros(N_neg_subsample), torch.ones(N_pos_subsample)])
+    X = torch.cat([neg_coords_subsample, pos_coords_subsample])
+
+
+    bp_dataset = BrainPatchesDataset(brain, mask, label, X, y, patch_size)
+    sampler = StratifiedSampler(y, patch_batch_size)
+
+    loader = DataLoader(bp_dataset, 
+                              batch_size=patch_batch_size,
+                              shuffle=False, 
+                              sampler=sampler, 
+                              num_workers=4)
+
+    return loader
+
+
 
 
 class Brats2020Dataset(Dataset):
@@ -216,9 +173,7 @@ class BrainMaskDataset(Dataset):
         if 'mask' in tensor_dict.keys():
             mask_tensor_torch = tensor_dict['mask']
 
-        features = set(self.features) - {'label', 'mask'}
-
-        brain_tensor_torch = torch.stack([tensor_dict[f] for f in features], dim=0)
+        brain_tensor_torch = torch.stack([tensor_dict[f] for f in self.features], dim=0)
 
         if self.trim_background:
             brain_tensor_torch, label_tensor_torch, mask_tensor_torch = trim(brain_tensor_torch, 

@@ -201,7 +201,6 @@ def load(path_dict):
 
 
 
-# TODO: add check that FCD is not on boundary!
 def check_patch(x,y,z,
                 mask_tensor, 
                 label_tensor, 
@@ -249,32 +248,6 @@ def save(experiment_dir, model, opt, epoch):
     dict_to_save = {'model_state': model.state_dict(),'opt_state' : opt.state_dict(), 'epoch':epoch}
     torch.save(dict_to_save, os.path.join(checkpoint_dir, f"weights_{epoch}.pth"))
 
-
-def DiceScoreBinary(input, 
-                    target, 
-                    include_backgroud=False, 
-                    weights=None):
-    '''
-    Binary Dice score
-    input - [bs,1,ps,ps,ps], probability [0,1]
-    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
-    '''
-
-    target = target.squeeze(1) # squeeze channel 
-    input = input.squeeze(1) # squeeze channel
-    
-    intersection = 2*torch.sum(input * target, dim=(1,2,3)) + 1 # [bs,]
-    cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) + 1 # [bs,]
-    dice_score = intersection / cardinality
-
-    return dice_score.mean()
-
-
-def DiceLossBinary(*args, **kwargs):
-    '''
-    input, target - [bs,1,H,W,D]
-    '''
-    return 1 - DiceScoreBinary(*args, **kwargs)
 
 
 

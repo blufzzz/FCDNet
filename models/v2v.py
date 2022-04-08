@@ -1,8 +1,8 @@
+# from https://github.com/blufzzz/learnable-triangulation-pytorch/blob/master/mvn/models/v2v.py
+
 import torch.nn as nn
 import torch.nn.functional as F
 from IPython.core.debugger import set_trace
-
-# from https://github.com/blufzzz/learnable-triangulation-pytorch/blob/master/mvn/models/v2v.py
 
 
 NORMALIZATION = 'batch_norm'
@@ -157,27 +157,25 @@ class V2VModel(nn.Module):
         super().__init__()
 
         self.sigmoid = config.model.sigmoid
-        # geom features
         input_channels = len(config.dataset.features)
         output_channels = config.model.output_channels
         max_channel = config.model.max_channel_encoder_decoder
 
+        # nasty hack to replace normalization layers if the model
         global NORMALIZATION
         NORMALIZATION = config.model.normalization if hasattr(config.model,'normalization') else 'batch_norm'
 
         self.front_layers = nn.Sequential(
-            Basic3DBlock(input_channels, 16, 7),
-            Res3DBlock(16, 32),
-            Res3DBlock(32, 32),
-            Res3DBlock(32, 32)
+            Basic3DBlock(input_channels, 32, 7),
+            Res3DBlock(64, 64),
+            Res3DBlock(64, 64),
         )
 
         self.encoder_decoder = EncoderDecorder(max_channel)
 
         self.back_layers = nn.Sequential(
-            Res3DBlock(32, 32),
-            Basic3DBlock(32, 32, 1),
-            Basic3DBlock(32, 32, 1),
+            Res3DBlock(64, 64),
+            Basic3DBlock(64, 32, 1),
         )
 
         self.output_layer = nn.Conv3d(32, output_channels, kernel_size=1, stride=1, padding=0)
@@ -202,11 +200,9 @@ class V2VModel(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
                 nn.init.xavier_normal_(m.weight)
-                # nn.init.normal_(m.weight, 0, 0.001)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.ConvTranspose3d):
                 nn.init.xavier_normal_(m.weight)
-                # nn.init.normal_(m.weight, 0, 0.001)
                 nn.init.constant_(m.bias, 0)
 
 

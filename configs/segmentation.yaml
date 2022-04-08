@@ -37,4 +37,4 @@ dataset:
   # metadata_path: 'metadata/metadata_fcd_nG.npy'
   # root: '/nfs/tom/ibulygin/fcd_data/tensors_orig'
   metadata_path: 'metadata/metadata_fcd.npy'
-  dataset_type: 'interpolated'
+  dataset_type: 'fcd'

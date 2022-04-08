@@ -1,13 +1,12 @@
+# https://github.com/frankkramer-lab/MIScnn
 import numpy as np
 import torch
 
-
-# Helper function to enable loss function to be flexibly used for 
-# both 2D or 3D image segmentation - source: https://github.com/frankkramer-lab/MIScnn
+# Helper function to enable loss function to be flexibly used for both 2D or 3D image segmentation
 def identify_dim(shape):
     # Three dimensional: [bs,C,H,W,D]
     if len(shape) == 5 : return [2,3,4]
-    # Two dimensional
+    # Two dimensional: [bs,C,H,W]
     elif len(shape) == 4 : return [2,3]
     # Exception - Unknown
     else : raise ValueError('Metric: Shape of tensor is neither 2D or 3D.')
@@ -156,8 +155,9 @@ def focal_loss(alpha=None, beta=None, gamma_f=2.):
         
     return loss_function
 
+
 ################################
-#       Symmetric Focal loss      #
+#       Symmetric Focal loss   #
 ################################
 def symmetric_focal_loss(delta=0.7, gamma=2.):
     """
@@ -338,4 +338,35 @@ def asym_unified_focal_loss(weight=0.5, delta=0.6, gamma=0.5):
       else:
         return asymmetric_ftl + asymmetric_fl
 
-    return loss_function
+    return 
+    loss_function
+
+
+
+
+
+def DiceScoreBinary(input, 
+                    target, 
+                    include_backgroud=False, 
+                    weights=None):
+    '''
+    Binary Dice score
+    input - [bs,1,ps,ps,ps], probability [0,1]
+    target - binary mask [bs,1,ps,ps,ps], 1 for foreground, 0 for background
+    '''
+
+    target = target.squeeze(1) # squeeze channel 
+    input = input.squeeze(1) # squeeze channel
+    
+    intersection = 2*torch.sum(input * target, dim=(1,2,3)) + 1 # [bs,]
+    cardinality = torch.sum(torch.pow(input,2) + torch.pow(target,2), dim=(1,2,3)) + 1 # [bs,]
+    dice_score = intersection / cardinality
+
+    return dice_score.mean()
+
+
+def DiceLossBinary(*args, **kwargs):
+    '''
+    input, target - [bs,1,H,W,D]
+    '''
+    return 1 - DiceScoreBinary(*args, **kwargs)
