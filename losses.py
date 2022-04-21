@@ -1,6 +1,33 @@
 # https://github.com/frankkramer-lab/MIScnn
 import numpy as np
 import torch
+from IPython.core.debugger import set_trace
+
+def compute_BCE(logits, targets, criterion, config):
+    device = targets.device
+    weights = torch.ones(targets.shape, dtype=torch.half).to(device)
+    weights[targets > 0] = weights[targets > 0]*config.opt.bce_pos_weight
+    weights[targets == 0] = weights[targets == 0]*config.opt.bce_neg_weight  
+    loss = criterion(weight=weights, reduction='mean')(logits, targets.type(torch.half))
+    return loss
+
+
+
+
+def binary_to_multiclass(y_pred, y_true):
+    '''
+    Maps 1-channel tensors with foreground class to 
+    2-channel tensors with foreground class with index 1
+    and background class with index 0
+    '''
+    # stack background and foreground
+    y_pred_ = torch.cat([1-y_pred, y_pred],1) 
+    y_true_ = torch.cat([1-y_true, y_true],1)
+
+    return y_pred_, y_true_
+
+
+
 
 # Helper function to enable loss function to be flexibly used for both 2D or 3D image segmentation
 def identify_dim(shape):
@@ -11,118 +38,118 @@ def identify_dim(shape):
     # Exception - Unknown
     else : raise ValueError('Metric: Shape of tensor is neither 2D or 3D.')
 
-################################
-#           Dice loss          #
-################################
-def dice_loss(delta = 0.5, smooth = 0.000001):
-    """Dice loss originates from Sørensen–Dice coefficient, which is a statistic developed in 1940s to gauge the similarity between two samples.
+# ################################
+# #           Dice loss          #
+# ################################
+# def dice_loss(delta = 0.5, smooth = 0.000001):
+#     """Dice loss originates from Sørensen–Dice coefficient, which is a statistic developed in 1940s to gauge the similarity between two samples.
     
-    Parameters
-    ----------
-    delta : float, optional
-        controls weight given to false positive and false negatives, by default 0.5
-    smooth : float, optional
-        smoothing constant to prevent division by zero errors, by default 0.000001
-    """
-    def loss_function(y_pred, y_true):
-        dim = identify_dim(y_true.shape)
-        # Calculate true positives (tp), false negatives (fn) and false positives (fp)
-        tp = torch.sum(y_true * y_pred, dim=dim)
-        fn = torch.sum(y_true * (1-y_pred), dim=dim)
-        fp = torch.sum((1-y_true) * y_pred, dim=dim)
-        # Calculate Dice score
-        dice_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
-        # Average class scores
-        dice_loss = torch.mean(1-dice_class)
+#     Parameters
+#     ----------
+#     delta : float, optional
+#         controls weight given to false positive and false negatives, by default 0.5
+#     smooth : float, optional
+#         smoothing constant to prevent division by zero errors, by default 0.000001
+#     """
+#     def loss_function(y_pred, y_true):
+#         dim = identify_dim(y_true.shape)
+#         # Calculate true positives (tp), false negatives (fn) and false positives (fp)
+#         tp = torch.sum(y_true * y_pred, dim=dim)
+#         fn = torch.sum(y_true * (1-y_pred), dim=dim)
+#         fp = torch.sum((1-y_true) * y_pred, dim=dim)
+#         # Calculate Dice score
+#         dice_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
+#         # Average class scores
+#         dice_loss = torch.mean(1-dice_class)
 
-        return dice_loss
+#         return dice_loss
         
-    return loss_function
+#     return loss_function
 
 
-################################
-#         Tversky loss         #
-################################
-def tversky_loss(delta = 0.7, smooth = 0.000001):
-    """Tversky loss function for image segmentation using 3D fully convolutional deep networks
-	Link: https://arxiv.org/abs/1706.05721
-    Parameters
-    ----------
-    delta : float, optional
-        controls weight given to false positive and false negatives, by default 0.7
-    smooth : float, optional
-        smoothing constant to prevent division by zero errors, by default 0.000001
-    """
+# ################################
+# #         Tversky loss         #
+# ################################
+# def tversky_loss(delta = 0.7, smooth = 0.000001):
+#     """Tversky loss function for image segmentation using 3D fully convolutional deep networks
+# 	Link: https://arxiv.org/abs/1706.05721
+#     Parameters
+#     ----------
+#     delta : float, optional
+#         controls weight given to false positive and false negatives, by default 0.7
+#     smooth : float, optional
+#         smoothing constant to prevent division by zero errors, by default 0.000001
+#     """
 
-    def loss_function(y_pred, y_true):
-        dim = identify_dim(y_true.shape)
-        # Calculate true positives (tp), false negatives (fn) and false positives (fp)   
-        tp = torch.sum(y_true * y_pred, dim=dim)
-        fn = torch.sum(y_true * (1-y_pred), dim=dim)
-        fp = torch.sum((1-y_true) * y_pred, dim=dim)
-        tversky_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
-        # Average class scores
-        tversky_loss = torch.mean(1-tversky_class)
+#     def loss_function(y_pred, y_true):
+#         dim = identify_dim(y_true.shape)
+#         # Calculate true positives (tp), false negatives (fn) and false positives (fp)   
+#         tp = torch.sum(y_true * y_pred, dim=dim)
+#         fn = torch.sum(y_true * (1-y_pred), dim=dim)
+#         fp = torch.sum((1-y_true) * y_pred, dim=dim)
+#         tversky_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
+#         # Average class scores
+#         tversky_loss = torch.mean(1-tversky_class)
 
-        return tversky_loss
+#         return tversky_loss
 
-    return loss_function
+#     return loss_function
 
-################################
-#       Dice coefficient       #
-################################
-def dice_coefficient(delta = 0.5, smooth = 0.000001):
-    """The Dice similarity coefficient, also known as the Sørensen–Dice index or simply Dice coefficient, is a statistical tool which measures the similarity between two sets of data.
-    Parameters
-    ----------
-    delta : float, optional
-        controls weight given to false positive and false negatives, by default 0.5
-    smooth : float, optional
-        smoothing constant to prevent division by zero errors, by default 0.000001
-    """
-    def loss_function(y_pred, y_true):
-        dim = identify_dim(y_true.shape)
-        # Calculate true positives (tp), false negatives (fn) and false positives (fp)   
-        tp = torch.sum(y_true * y_pred, dim=dim)
-        fn = torch.sum(y_true * (1-y_pred), dim=dim)
-        fp = torch.sum((1-y_true) * y_pred, dim=dim)
-        dice_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
-        # Average class scores
-        dice = torch.mean(dice_class)
+# ################################
+# #       Dice coefficient       #
+# ################################
+# def dice_coefficient(delta = 0.5, smooth = 0.000001):
+#     """The Dice similarity coefficient, also known as the Sørensen–Dice index or simply Dice coefficient, is a statistical tool which measures the similarity between two sets of data.
+#     Parameters
+#     ----------
+#     delta : float, optional
+#         controls weight given to false positive and false negatives, by default 0.5
+#     smooth : float, optional
+#         smoothing constant to prevent division by zero errors, by default 0.000001
+#     """
+#     def loss_function(y_pred, y_true):
+#         dim = identify_dim(y_true.shape)
+#         # Calculate true positives (tp), false negatives (fn) and false positives (fp)   
+#         tp = torch.sum(y_true * y_pred, dim=dim)
+#         fn = torch.sum(y_true * (1-y_pred), dim=dim)
+#         fp = torch.sum((1-y_true) * y_pred, dim=dim)
+#         dice_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
+#         # Average class scores
+#         dice = torch.mean(dice_class)
 
-        return dice
+#         return dice
 
-    return loss_function
+#     return loss_function
 
 
 
-################################
-#      Focal Tversky loss      #
-################################
-def focal_tversky_loss(delta=0.7, gamma=0.7, smooth=0.000001):
-    """A Novel Focal Tversky loss function with improved Attention U-Net for lesion segmentation
-    Link: https://arxiv.org/abs/1810.07842
-    Parameters
-    ----------
-    gamma : float, optional
-        focal parameter controls degree of down-weighting of easy examples, by default 0.75
-    """
-    def loss_function(y_pred, y_true):
-        # Clip values to prevent division by zero error
-        epsilon = 1e-10
-        y_pred = torch.clip(y_pred, epsilon, 1. - epsilon) 
-        dim = identify_dim(y_true.shape)
-        # Calculate true positives (tp), false negatives (fn) and false positives (fp)     
-        tp = torch.sum(y_true * y_pred, dim=dim)
-        fn = torch.sum(y_true * (1-y_pred), dim=dim)
-        fp = torch.sum((1-y_true) * y_pred, dim=dim)
-        tversky_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
-        # Average class scores
-        focal_tversky_loss = torch.mean(torch.pow((1-tversky_class), gamma))
+# ################################
+# #      Focal Tversky loss      #
+# ################################
+# def focal_tversky_loss(delta=0.7, gamma=0.7, smooth=0.000001):
+#     """A Novel Focal Tversky loss function with improved Attention U-Net for lesion segmentation
+#     Link: https://arxiv.org/abs/1810.07842
+#     Parameters
+#     ----------
+#     gamma : float, optional
+#         focal parameter controls degree of down-weighting of easy examples, by default 0.75
+#     """
+#     def loss_function(y_pred, y_true):
+#         # Clip values to prevent division by zero error
+#         epsilon = 1e-10
+#         y_pred = torch.clip(y_pred, epsilon, 1. - epsilon) 
+#         dim = identify_dim(y_true.shape)
+#         # Calculate true positives (tp), false negatives (fn) and false positives (fp)     
+#         tp = torch.sum(y_true * y_pred, dim=dim)
+#         fn = torch.sum(y_true * (1-y_pred), dim=dim)
+#         fp = torch.sum((1-y_true) * y_pred, dim=dim)
+#         tversky_class = (tp + smooth)/(tp + delta*fn + (1-delta)*fp + smooth)
+#         # Average class scores
+#         focal_tversky_loss = torch.mean(torch.pow((1-tversky_class), gamma))
 	
-        return focal_tversky_loss
+#         return focal_tversky_loss
 
-    return loss_function
+#     return loss_function
 
 
 ################################
@@ -138,6 +165,9 @@ def focal_loss(alpha=None, beta=None, gamma_f=2.):
         focal parameter controls degree of down-weighting of easy examples, by default 2.
     """
     def loss_function(y_pred, y_true):
+
+        y_pred, y_true = binary_to_multiclass(y_pred, y_true)
+
         dim = identify_dim(y_true.shape)
         # Clip values to prevent division by zero error
         epsilon = 1e-10
@@ -170,16 +200,19 @@ def symmetric_focal_loss(delta=0.7, gamma=2.):
     """
     def loss_function(y_pred, y_true):
 
+        y_pred, y_true = binary_to_multiclass(y_pred, y_true)
+
         dim = identify_dim(y_true.shape)  
 
         epsilon = 1e-10
         y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
-        cross_entropy = -y_true * torch.log(y_pred)
-        #calculate losses separately for each class
-        back_ce = torch.pow(1 - y_pred[:,:,:,0], gamma) * cross_entropy[:,:,:,0]
+        cross_entropy = -y_true * torch.log(y_pred + 1e-5)
+
+        # calculate losses separately for each class
+        back_ce = torch.pow(1 - y_pred[:,0], gamma) * cross_entropy[:,0]
         back_ce =  (1 - delta) * back_ce
 
-        fore_ce = torch.pow(1 - y_pred[:,:,:,1], gamma) * cross_entropy[:,:,:,1]
+        fore_ce = torch.pow(1 - y_pred[:,1], gamma) * cross_entropy[:,1]
         fore_ce = delta * fore_ce
 
         loss = torch.mean(torch.sum(torch.stack([back_ce, fore_ce],dim=-1),dim=-1))
@@ -187,6 +220,9 @@ def symmetric_focal_loss(delta=0.7, gamma=2.):
         return loss
 
     return loss_function
+
+
+
 
 #################################
 # Symmetric Focal Tversky loss  #
@@ -201,11 +237,15 @@ def symmetric_focal_tversky_loss(delta=0.7, gamma=0.75):
         focal parameter controls degree of down-weighting of easy examples, by default 0.75
     """
     def loss_function(y_pred, y_true):
+
+        y_pred, y_true = binary_to_multiclass(y_pred, y_true)
+
         # Clip values to prevent division by zero error
         epsilon = 1e-10
         y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
 
         dim = identify_dim(y_true.shape)
+
         # Calculate true positives (tp), false negatives (fn) and false positives (fp)     
         tp = torch.sum(y_true * y_pred, dim=dim)
         fn = torch.sum(y_true * (1-y_pred), dim=dim)
@@ -217,79 +257,82 @@ def symmetric_focal_tversky_loss(delta=0.7, gamma=0.75):
         fore_dice = (1-dice_class[:,1]) * torch.pow(1-dice_class[:,1], -gamma) 
 
         # Average class scores
-        loss = torch.mean(torch.stack([back_dice,fore_dice],dim=-1))
+        loss = torch.mean(torch.stack([back_dice, fore_dice], dim=-1))
+
         return loss
 
     return loss_function
 
 
-################################
-#     Asymmetric Focal loss    #
-################################
-def asymmetric_focal_loss(delta=0.7, gamma=2.):
 
-    def loss_function(y_pred, y_true):
+
+# ################################
+# #     Asymmetric Focal loss    #
+# ################################
+# def asymmetric_focal_loss(delta=0.7, gamma=2.):
+
+#     def loss_function(y_pred, y_true):
         
-        """For Imbalanced datasets
-        Parameters
-        ----------
-        delta : float, optional
-            controls weight given to false positive and false negatives, by default 0.7
-        gamma : float, optional
-            Focal Tversky loss' focal parameter controls degree of down-weighting of easy examples, by default 2.0
-        """
-        dim = identify_dim(y_true.shape)  
+#         """For Imbalanced datasets
+#         Parameters
+#         ----------
+#         delta : float, optional
+#             controls weight given to false positive and false negatives, by default 0.7
+#         gamma : float, optional
+#             Focal Tversky loss' focal parameter controls degree of down-weighting of easy examples, by default 2.0
+#         """
+#         dim = identify_dim(y_true.shape)  
 
-        epsilon = 1e-10
-        y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
-        cross_entropy = -y_true * torch.log(y_pred)
+#         epsilon = 1e-10
+#         y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
+#         cross_entropy = -y_true * torch.log(y_pred)
 
-        #calculate losses separately for each class, only suppressing background class
-        back_ce = torch.pow(1 - y_pred[:,:,:,0], gamma) * cross_entropy[:,:,:,0]
-        back_ce =  (1 - delta) * back_ce
+#         #calculate losses separately for each class, only suppressing background class
+#         back_ce = torch.pow(1 - y_pred[:,:,:,0], gamma) * cross_entropy[:,:,:,0]
+#         back_ce =  (1 - delta) * back_ce
 
-        fore_ce = cross_entropy[:,:,:,1]
-        fore_ce = delta * fore_ce
+#         fore_ce = cross_entropy[:,:,:,1]
+#         fore_ce = delta * fore_ce
 
-        loss = torch.mean(torch.sum(torch.stack([back_ce, fore_ce],dim=-1),dim=-1))
+#         loss = torch.mean(torch.sum(torch.stack([back_ce, fore_ce],dim=-1),dim=-1))
 
-        return loss
+#         return loss
 
-    return loss_function
+#     return loss_function
 
-#################################
-# Asymmetric Focal Tversky loss #
-#################################
-def asymmetric_focal_tversky_loss(delta=0.7, gamma=0.75):
-    """This is the implementation for binary segmentation.
-    Parameters
-    ----------
-    delta : float, optional
-        controls weight given to false positive and false negatives, by default 0.7
-    gamma : float, optional
-        focal parameter controls degree of down-weighting of easy examples, by default 0.75
-    """
-    def loss_function(y_pred, y_true):
-        # Clip values to prevent division by zero error
-        epsilon = 1e-10
-        y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
+# #################################
+# # Asymmetric Focal Tversky loss #
+# #################################
+# def asymmetric_focal_tversky_loss(delta=0.7, gamma=0.75):
+#     """This is the implementation for binary segmentation.
+#     Parameters
+#     ----------
+#     delta : float, optional
+#         controls weight given to false positive and false negatives, by default 0.7
+#     gamma : float, optional
+#         focal parameter controls degree of down-weighting of easy examples, by default 0.75
+#     """
+#     def loss_function(y_pred, y_true):
+#         # Clip values to prevent division by zero error
+#         epsilon = 1e-10
+#         y_pred = torch.clip(y_pred, epsilon, 1. - epsilon)
 
-        dim = identify_dim(y_true.shape)
-        # Calculate true positives (tp), false negatives (fn) and false positives (fp)     
-        tp = torch.sum(y_true * y_pred, dim=dim)
-        fn = torch.sum(y_true * (1-y_pred), dim=dim)
-        fp = torch.sum((1-y_true) * y_pred, dim=dim)
-        dice_class = (tp + epsilon)/(tp + delta*fn + (1-delta)*fp + epsilon)
+#         dim = identify_dim(y_true.shape)
+#         # Calculate true positives (tp), false negatives (fn) and false positives (fp)     
+#         tp = torch.sum(y_true * y_pred, dim=dim)
+#         fn = torch.sum(y_true * (1-y_pred), dim=dim)
+#         fp = torch.sum((1-y_true) * y_pred, dim=dim)
+#         dice_class = (tp + epsilon)/(tp + delta*fn + (1-delta)*fp + epsilon)
 
-        #calculate losses separately for each class, only enhancing foreground class
-        back_dice = (1-dice_class[:,0]) 
-        fore_dice = (1-dice_class[:,1]) * torch.pow(1-dice_class[:,1], -gamma) 
+#         #calculate losses separately for each class, only enhancing foreground class
+#         back_dice = (1-dice_class[:,0]) 
+#         fore_dice = (1-dice_class[:,1]) * torch.pow(1-dice_class[:,1], -gamma) 
 
-        # Average class scores
-        loss = torch.mean(torch.stack([back_dice,fore_dice],dim=-1))
-        return loss
+#         # Average class scores
+#         loss = torch.mean(torch.stack([back_dice,fore_dice],dim=-1))
+#         return loss
 
-    return loss_function
+#     return loss_function
 
 
 ###########################################
@@ -307,41 +350,41 @@ def sym_unified_focal_loss(weight=0.5, delta=0.6, gamma=0.5):
         focal parameter controls the degree of background suppression and foreground enhancement, by default 0.5
     """
     def loss_function(y_pred, y_true):
-      symmetric_ftl = symmetric_focal_tversky_loss(delta=delta, gamma=gamma)(y_pred, y_true)
-      symmetric_fl = symmetric_focal_loss(delta=delta, gamma=gamma)(y_pred, y_true)
-      if weight is not None:
-        return (weight * symmetric_ftl) + ((1-weight) * symmetric_fl)  
-      else:
-        return symmetric_ftl + symmetric_fl
+
+        symmetric_ftl = symmetric_focal_tversky_loss(delta=delta, gamma=gamma)(y_pred, y_true)
+        symmetric_fl = symmetric_focal_loss(delta=delta, gamma=gamma)(y_pred, y_true)
+        if weight is not None:
+            return (weight * symmetric_ftl) + ((1-weight) * symmetric_fl)  
+        else:
+            return symmetric_ftl + symmetric_fl
 
     return loss_function
 
-###########################################
-#      Asymmetric Unified Focal loss      #
-###########################################
-def asym_unified_focal_loss(weight=0.5, delta=0.6, gamma=0.5):
-    """The Unified Focal loss is a new compound loss function that unifies Dice-based and cross entropy-based loss functions into a single framework.
-    Parameters
-    ----------
-    weight : float, optional
-        represents lambda parameter and controls weight given to asymmetric Focal Tversky loss and asymmetric Focal loss, by default 0.5
-    delta : float, optional
-        controls weight given to each class, by default 0.6
-    gamma : float, optional
-        focal parameter controls the degree of background suppression and foreground enhancement, by default 0.5
-    """
-    def loss_function(y_pred, y_true):
-      asymmetric_ftl = asymmetric_focal_tversky_loss(delta=delta, gamma=gamma)(y_pred, y_true)
-      asymmetric_fl = asymmetric_focal_loss(delta=delta, gamma=gamma)(y_pred, y_true)
-      if weight is not None:
-        return (weight * asymmetric_ftl) + ((1-weight) * asymmetric_fl)  
-      else:
-        return asymmetric_ftl + asymmetric_fl
 
-    return 
-    loss_function
+# ###########################################
+# #      Asymmetric Unified Focal loss      #
+# ###########################################
+# def asym_unified_focal_loss(weight=0.5, delta=0.6, gamma=0.5):
+#     """The Unified Focal loss is a new compound loss function that unifies Dice-based and cross entropy-based loss functions into a single framework.
+#     Parameters
+#     ----------
+#     weight : float, optional
+#         represents lambda parameter and controls weight given to asymmetric Focal Tversky loss and asymmetric Focal loss, by default 0.5
+#     delta : float, optional
+#         controls weight given to each class, by default 0.6
+#     gamma : float, optional
+#         focal parameter controls the degree of background suppression and foreground enhancement, by default 0.5
+#     """
+#     def loss_function(y_pred, y_true):
+#       asymmetric_ftl = asymmetric_focal_tversky_loss(delta=delta, gamma=gamma)(y_pred, y_true)
+#       asymmetric_fl = asymmetric_focal_loss(delta=delta, gamma=gamma)(y_pred, y_true)
+#       if weight is not None:
+#         return (weight * asymmetric_ftl) + ((1-weight) * asymmetric_fl)  
+#       else:
+#         return asymmetric_ftl + asymmetric_fl
 
-
+#     return 
+#     loss_function
 
 
 

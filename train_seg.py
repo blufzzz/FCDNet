@@ -16,12 +16,18 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from utils import save, parse_args, get_capacity
 from models.v2v import V2VModel
+from models.unet3d import UnetModel
 import torchio as tio
 from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
 from losses import focal_tversky_loss, DiceScoreBinary, DiceLossBinary
+from torch.cuda.amp import autocast
 
+# enable cuDNN benchmark
+torch.backends.cudnn.benchmark = True
+# torch.use_deterministic_algorithms(True)
+torch.manual_seed(42)
 
 def one_epoch(model, 
                 criterion, 
@@ -37,10 +43,18 @@ def one_epoch(model,
                 is_train=True):
 
 
+    # use amp to accelerate training
+    scaler = torch.cuda.amp.GradScaler()
+
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
     metric_dict = defaultdict(list)
     target_metric_name = config.model.target_metric_name 
+
+    if not is_train:
+        model.eval()
+    else:
+        model.train()
 
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
@@ -49,6 +63,7 @@ def one_epoch(model,
         val_predictions = {}
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
             
+            t1 = time.time()
 
             if (augmentation is not None) and is_train:
                 subject = tio.Subject(
@@ -66,7 +81,7 @@ def one_epoch(model,
             if config.interpolate:
                 brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
                 label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device)
-                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device)
+                mask_tensor = F.interpolate(mask_tensor.type(torch.float), config.interpolation_size).type(torch.bool).to(device)
             else:
                 brain_tensor = brain_tensor.to(device)
                 label_tensor = label_tensor.to(device)
@@ -74,26 +89,37 @@ def one_epoch(model,
 
 
             # forward pass
-            label_tensor_predicted = model(brain_tensor) # -> [bs,1,ps,ps,ps]
-            
+            with autocast():
+                label_tensor_predicted = model(brain_tensor) # -> [bs,1,ps,ps,ps]
+
             if config.opt.criterion == "BCE":
                 weights = torch.ones(label_tensor.shape).to(device)
-                weights[label_tensor > 0] = config.opt.bce_weights   #250
+                weights[label_tensor > 0] = weights[label_tensor > 0]*config.opt.bce_weights
                 loss = criterion(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor)
             elif config.opt.criterion == "DiceBCE":
                 weights = torch.ones(label_tensor.shape).to(device)
-                weights[label_tensor > 0] = config.opt.bce_weights   #250
+                weights[label_tensor > 0] = weights[label_tensor > 0]*config.opt.bce_weights
                 loss = torch.nn.BCELoss(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor) + \
-                        DiceLossBinary(label_tensor_predicted, label_tensor)
+                                DiceLossBinary(label_tensor_predicted, label_tensor)
             else:
                 loss = criterion(label_tensor_predicted, label_tensor) 
 
 
             if is_train:
                 opt.zero_grad()
-                loss.backward()
-                opt.step()
+
+                # loss.backward()
+                # opt.step()
+                
+                scaler.scale(loss).backward() # loss.backward()
+                scaler.step(opt) # opt.step()
+                scaler.update()
+
+
+            t2 = time.time()    
+            dt = t2-t1 # inference time
             
+            metric_dict[f'batch_time'].append(dt)
             metric_dict[f'{loss_name}'].append(loss.item())
             label_tensor_predicted = label_tensor_predicted*mask_tensor
             dice_score = DiceScoreBinary(label_tensor_predicted, label_tensor)
@@ -106,7 +132,7 @@ def one_epoch(model,
             metric_dict['coverage'].append(coverage.item())
             metric_dict['dice_score'].append(dice_score.item())
 
-            print(f'Epoch: {epoch}, iter: {iter_i}, Loss_{loss_name}: {loss.item()}, DICE: {dice_score.item()}')
+            print(f'Epoch: {epoch}, Iter: {iter_i}, Loss_{loss_name}: {loss.item()}, Dice-score: {dice_score.item()}, time: {np.round(dt,2)}-s')
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -144,7 +170,9 @@ def main(args):
     with open(args.config) as fin:
         config = edict(yaml.safe_load(fin))
 
-    # setting logs
+    ##########
+    # LOGDIR #
+    ##########
     MAKE_LOGS = config.make_logs
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
@@ -153,7 +181,7 @@ def main(args):
     experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
     print("Experiment name: {}".format(experiment_name))
 
-    
+    writer = None
     if MAKE_LOGS:
         experiment_dir = os.path.join(args.logdir, experiment_name)
         if os.path.isdir(experiment_dir):
@@ -165,9 +193,17 @@ def main(args):
             config.dataset.val_preds_path = val_preds_path
             os.makedirs(val_preds_path)
 
-    writer = SummaryWriter(os.path.join(experiment_dir, "tb")) if MAKE_LOGS else None
-    model = V2VModel(config).to(device)
+        writer = SummaryWriter(os.path.join(experiment_dir, "tb")) 
+    
+    #########
+    # MODEL #
+    #########
+    if config.model.name == "v2v":
+        model = V2VModel(config).to(device)
+    elif config.model.name == "unet3d":
+        model = UnetModel(config).to(device)
     capacity = get_capacity(model)
+
     print(f'Model created! Capacity: {capacity}')
 
     if hasattr(config.model, 'weights'):
@@ -190,8 +226,8 @@ def main(args):
     transform = None
     if config.opt.augmentation:
         symmetry = tio.RandomFlip(axes=0) 
-        noise = tio.RandomNoise(std=(0,1e-3))
-        blur = tio.RandomBlur((0,1e-1))
+        noise = tio.RandomNoise(std=(0,1e-2))
+        blur = tio.RandomBlur((0,1e-2))
         affine = tio.RandomAffine(scales=(0.95, 1.05, 0.95, 1.05, 0.95, 1.05), 
                                  degrees=3,
                                  translation=(1,1,1),
@@ -199,7 +235,6 @@ def main(args):
                                  default_pad_value=0)
         rescale = tio.RescaleIntensity(out_min_max=(0, 1))
         transform = tio.Compose([symmetry, blur, noise, affine, rescale])
-
 
     ################
     # CREATE OPTIM #
@@ -211,8 +246,6 @@ def main(args):
         "FocalTversky":focal_tversky_loss(),
     }[config.opt.criterion]
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
-
-
 
     ############
     # TRAINING #

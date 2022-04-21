@@ -5,9 +5,10 @@ import pandas as pd
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from utils import trim, normalize
 from torchsample import StratifiedSampler
+
 
 
 def create_datasets(config):
@@ -106,8 +107,6 @@ def BalancedSampler(subject, patch_size, patches_per_brain, patch_batch_size, la
     return loader
 
 
-
-
 class Brats2020Dataset(Dataset):
 
     def __init__(self, config, train=True):
@@ -129,13 +128,17 @@ class Brats2020Dataset(Dataset):
         label_tensor_torch = tensor_dict['seg']
         if 'mask' in tensor_dict.keys():
             mask_tensor_torch = tensor_dict['mask']
-        features = sorted(set(self.features) - {'seg', 'mask'})
-        brain_tensor_torch = torch.stack([tensor_dict[f] for f in features], dim=0) 
+        else:
+            mask_tensor_torch = None
+
+        # features = sorted(set(self.features) - {'seg', 'mask'})
+
+        brain_tensor_torch = torch.stack([tensor_dict[f] for f in self.features], dim=0) 
 
         if self.trim_background:
             brain_tensor_torch, label_tensor_torch, mask_tensor_torch = trim(brain_tensor_torch, 
                                                                              label_tensor_torch,
-                                                                             mask_tensor_torch)
+                                                                              mask_tensor_torch)
             
         return brain_tensor_torch,\
                 mask_tensor_torch.unsqueeze(0),\
@@ -143,6 +146,22 @@ class Brats2020Dataset(Dataset):
 
     def __len__(self):
         return len(self.paths) 
+
+
+def add_xyz(input, mask):
+
+    '''
+    input - [C,H,W,D]
+    '''
+
+    _,X,Y,Z = input.shape
+
+    xyz_grid = torch.tensor(np.stack(np.meshgrid(np.arange(X)/X, 
+                            np.arange(Y)/Y, 
+                            np.arange(Z)/Z, 
+                            indexing='ij'), 0), dtype=input.dtype).to(input.device)
+
+    return torch.cat([xyz_grid,input],0) * mask
 
 
 class BrainMaskDataset(Dataset):
@@ -153,6 +172,7 @@ class BrainMaskDataset(Dataset):
         self.train = train
         self.trim_background = config.trim_background
         self.metadata_path = config.metadata_path
+        self.add_xyz = config.add_xyz
 
         self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
@@ -179,6 +199,7 @@ class BrainMaskDataset(Dataset):
             brain_tensor_torch, label_tensor_torch, mask_tensor_torch = trim(brain_tensor_torch, 
                                                                              label_tensor_torch,
                                                                              mask_tensor_torch)
+
         return brain_tensor_torch, \
                 mask_tensor_torch.unsqueeze(0), \
                 label_tensor_torch.unsqueeze(0)

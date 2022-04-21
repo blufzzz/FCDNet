@@ -5,8 +5,8 @@ silent: false
 
 opt:
   device: 1
-  criterion: "DiceBCE" # "Dice" 
-  bce_weights: 250
+  criterion: "Dice" # "Dice" 
+  # bce_weights: 250
  
   start_epoch: 0
   n_epochs: 9999
@@ -17,24 +17,29 @@ opt:
   val_batch_size: 1
 
   lr: 0.001  
-  save_model: true
+  save_model: false
 
 model:
-  name: "v2v" 
+  name: "v2v" # "unet3d" 
+  model_depth: 4
   output_channels: 1 # FCD and background
   max_channel_encoder_decoder: 128 
   sigmoid: true
-  normalization: 'group_norm'
+  normalization: 'instance_norm'
   use_greedy_saving: false
   target_metric_name: 'dice_score'
 
 dataset:
   save_best_val_predictions: true
   trim_background: true  
-  features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
-  root: '/nfs/tom/ibulygin/fcd_data/tensors_MNI152'
   
-  # metadata_path: 'metadata/metadata_fcd_nG.npy'
-  # root: '/nfs/tom/ibulygin/fcd_data/tensors_orig'
-  metadata_path: 'metadata/metadata_fcd.npy'
+  features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
+  root: '/nfs/tom/ibulygin/fcd_data/tensors_nG'
+  metadata_path: 'metadata/metadata_fcd_nG.npy'
   dataset_type: 'fcd'
+
+  # features: ['t1', 't1ce', 't2', 'flair']
+  # root: '/nfs/tom/ibulygin/fcd_data/brats2020_tensors'
+  # metadata_path: 'metadata/metadata_brats2020.npy'
+  # dataset_type: 'brats'
+

@@ -137,6 +137,7 @@ def create_dicts(root_label,
     '''
     
     keys = [label_extractor(p) for p in os.listdir(root_label)]
+    
     if broken_labels is not None:
         keys = set(keys)-set(broken_labels)
 
@@ -180,8 +181,6 @@ def normalize(brain_tensor, mask=None):
 
     ndim = len(brain_tensor.shape)
 
-    # if ndim == 4
-    
     if mask is None:
         background = brain_tensor[0,0,0]
         brain_tensor = brain_tensor - background # make background-level pixel to be zero

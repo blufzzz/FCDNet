@@ -5,7 +5,7 @@ from datetime import datetime
 import os
 import shutil
 from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
-from datasets import create_datasets, BrainPatchesDataset, BalancedSampler
+from datasets import create_datasets, BrainPatchesDataset, BalancedSampler, add_xyz
 import yaml
 from easydict import EasyDict as edict
 import numpy as np
@@ -16,12 +16,17 @@ from torch import nn
 from torch import autograd
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchio as tio
-from losses import DiceScoreBinary, DiceLossBinary
+from losses import DiceScoreBinary, DiceLossBinary, sym_unified_focal_loss, compute_BCE, symmetric_focal_loss
 from utils import get_capacity, save, parse_args
 from models.v2v import V2VModel
+
+# enable cuDNN benchmark
+torch.backends.cudnn.benchmark = True
+torch.manual_seed(42)
 
 
 def one_epoch(model, 
@@ -36,7 +41,9 @@ def one_epoch(model,
                 n_iters_total=0,
                 augmentation=None, 
                 is_train=True):
-
+    
+    # use amp to accelerate training
+    scaler = torch.cuda.amp.GradScaler()
 
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
@@ -56,6 +63,11 @@ def one_epoch(model,
     if pov%2!=0:
         pov+=1
 
+    if not is_train:
+        model.eval()
+    else:
+        model.train()
+
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
     with grad_context():
@@ -63,6 +75,7 @@ def one_epoch(model,
         # brain_tensor - [1,C,H,W,D]
         # mask_tensor - [1,1,H,W,D]
         # label_tensor - [1,1,H,W,D]
+
         #######################
         # ITERATE OVER BRAINS #
         #######################
@@ -79,18 +92,26 @@ def one_epoch(model,
             else:
                 print(f'Label: {label}', label_tensor.sum())
 
+ 
             subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
-                                  mask=tio.LabelMap(tensor=mask_tensor[0]),
-                                  label=tio.LabelMap(tensor=label_tensor[0]))
-            
+                              mask=tio.LabelMap(tensor=mask_tensor[0]),
+                              label=tio.LabelMap(tensor=label_tensor[0])) 
+        
             if is_train and (augmentation is not None):
                 subject = augmentation(subject)
-                # make 0 background
+
+            if config.dataset.add_xyz:
+                subject['t1'].set_data(add_xyz(subject['t1'].data, subject['mask'].data))
 
             if sampler_type == 'grid':
                 grid_sampler = tio.inference.GridSampler(subject, patch_size, pov)
                 patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size, shuffle=True)
                 aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
+                
+                targets_patches = [] # if patch contains fcd
+                preds_patches = [] # if fcd predicted in patch
+                probs_patches = [] # patch fcd confidence
+
             elif sampler_type == 'balanced':
                 patch_loader = BalancedSampler(subject, 
                                                 patch_size, 
@@ -103,7 +124,7 @@ def one_epoch(model,
             ##############################################################################
             metric_dict_patch = defaultdict(list)
             print(f'Iterating for {label}, {len(patch_loader)}')
-            for patch_i, patches_batch in enumerate(patch_loader):
+            for patch_i, patches_batch in enumerate(tqdm(patch_loader)):
 
                 if sampler_type == 'grid':
                     inputs = patches_batch['t1'][tio.DATA].to(device)  # [bs,C,p,p,p]
@@ -112,38 +133,49 @@ def one_epoch(model,
                     inputs, targets = patches_batch
                     inputs = inputs.to(device)
                     targets = targets.to(device)
-                    
 
-                logits = model(inputs)
+
+                with autocast():     
+                    logits = model(inputs)
 
                 if config.opt.criterion == "BCE":
-                    weights = torch.ones(targets.shape).to(device)
-                    weights[targets > 0] = config.opt.bce_weights  
-                    loss = criterion(weight=weights, reduction='mean')(logits, targets)
+                    loss = compute_BCE(logits, targets, criterion, config)
+               
                 elif config.opt.criterion == "DiceBCE":
-                    weights = torch.ones(targets.shape).to(device)
-                    weights[targets > 0] = config.opt.bce_weights  
-                    loss = torch.nn.BCELoss(weight=weights, reduction='mean')(logits, targets) + \
-                            DiceLossBinary(logits, targets)
-                elif config.opt.criterion == "CoverageBCE":
-                    weights = torch.ones(targets.shape).to(device)
-                    weights[targets > 0] = config.opt.bce_weights 
-                    coverage = (logits*targets).sum() / (targets.sum() + 1e-5)
-                    loss = torch.nn.BCELoss(weight=weights, reduction='mean')(logits, targets) + coverage
+                    loss = compute_BCE(logits, targets, criterion, config)
+                    loss += DiceLossBinary(logits, targets)
+                
                 else:
                     loss = criterion(logits, targets) # [bs,1,p,p,p], [bs,1,p,p,p]
 
                 
                 if is_train:
                     opt.zero_grad()
-                    loss.backward()
-                    opt.step()
-
+                    scaler.scale(loss).backward() # loss.backward()
+                    scaler.step(opt) # opt.step()
+                    scaler.update()
 
                 # casting back to patch
                 if sampler_type == 'grid':
                     locations = patches_batch[tio.LOCATION]
                     aggregator.add_batch(logits.detach(), locations)
+
+                    ####################
+                    # HIT-RATE METRICS #
+                    ####################
+
+                    targets_sum = targets.sum((-1,-2,-3)) # [bs,1]
+                    targets_ =  targets_sum > 0
+                    targets_ = targets_.squeeze(1).detach().cpu().numpy().astype(int)
+                    
+                    preds_ = (logits * targets).sum((-1,-2,-3)) > 0.01*targets_sum # hit = 1% intersection
+                    preds_ = preds_.squeeze(1).detach().cpu().numpy().astype(int)
+                    
+                    probs_ = logits.mean((-1,-2,-3)).squeeze(1).detach().cpu().numpy()
+
+                    targets_patches.append(targets_)
+                    preds_patches.append(preds_)
+                    probs_patches.append(probs_)
 
                 #####################
                 # per-PATCH METRICS #
@@ -154,16 +186,48 @@ def one_epoch(model,
             for k,v in metric_dict_patch.items():
                 metric_dict[k].append(np.mean(v))
 
-            #######################
-            # Whole-brain metrics #
-            #######################
+
+            ##################
+            # GRID - METRICS #
+            ##################
             if sampler_type == 'grid':
+
+                #######################
+                # Whole-brain metrics #
+                #######################
                 output_tensor = aggregator.get_output_tensor().unsqueeze(1) # [1,1,H,W,D]
                 output_tensor = output_tensor * mask_tensor # zeros all non mask values
                 dice = DiceScoreBinary(output_tensor, label_tensor).item()
                 coverage = (output_tensor*label_tensor).sum() / label_tensor.sum()
                 metric_dict['dice_score'].append(dice)
                 metric_dict['coverage'].append(coverage.item())
+
+                targets_all=np.concatenate(targets_patches)
+                preds_all=np.concatenate(preds_patches)
+                probs_all=np.concatenate(probs_patches)
+
+                accuracy = accuracy_score(targets_all, preds_all)
+                precision = precision_score(targets_all, preds_all, zero_division=0)
+                recall = recall_score(targets_all, preds_all, zero_division=0)
+                roc_auc = roc_auc_score(targets_all, probs_all, average='samples')
+                f1 = f1_score(targets_all, preds_all, average='weighted')
+
+                metric_dict['accuracy'].append(accuracy)
+                metric_dict['precision'].append(precision)
+                metric_dict['recall'].append(recall)
+                metric_dict['roc_auc_samples'].append(roc_auc)
+                metric_dict['f1_weighted'].append(f1)
+
+                ###########
+                # HITRATE #
+                ###########
+                # sorting by predicted probabilities
+                argsort = np.argsort(probs_all, axis=0)[::-1]
+                for top_k in [5, 10, 25]:
+                    top_k_fcd = targets_all[argsort][:top_k]
+                    hitrate = top_k_fcd.mean()
+                    metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
+
             if not is_train:
                 val_predictions[label] = output_tensor.detach().cpu().numpy()
 
@@ -273,8 +337,8 @@ def main(args):
     augmentation = None
     if config.opt.augmentation:
         symmetry = tio.RandomFlip(axes=0) 
-        noise = tio.RandomNoise(std=(0,1e-3))
-        blur = tio.RandomBlur((0,1e-1))
+        noise = tio.RandomNoise(std=(0,1e-2))
+        blur = tio.RandomBlur((0,1e-2))
         affine = tio.RandomAffine(scales=(0.95, 1.05, 0.95, 1.05, 0.95, 1.05), 
                                  degrees=3,
                                  translation=(1,1,1),
@@ -290,7 +354,10 @@ def main(args):
         "Dice": DiceLossBinary, 
         "BCE": nn.BCELoss,
         "DiceBCE":None,
-        "CoverageBCE":None
+        "SFL": symmetric_focal_loss(delta=config.opt.delta, gamma=config.opt.gamma),
+        "Unified":sym_unified_focal_loss(weight=config.opt.weight, # 0.5
+                                         delta=config.opt.delta,  # 0.6
+                                         gamma=config.opt.gamma) # 0.5
     }[config.opt.criterion] 
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
 

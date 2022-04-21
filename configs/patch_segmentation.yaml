@@ -1,49 +1,54 @@
 make_logs: true
+comment: "Percentile clipping for tensors_nG"
 
 opt:
   device: 1
-  criterion: "Dice"
-  bce_weights: 1
+  criterion: "SFL" #"Unified"
+  delta: 0.99 # 0.5
+  gamma: 2 # 0.6
+  weight: 0.5 # for USFL
  
   start_epoch: 0
   n_epochs: 9999
 
-  augmentation: false #true
+  augmentation: true #true
 
   train_batch_size: 1
   val_batch_size: 1
 
   lr: 0.001
-  save_model: false
- 
+  save_model: true
+  
 model:
   name: "v2v" 
   output_channels: 1 
   max_channel_encoder_decoder: 128 
   sigmoid: true
-  normalization: 'group_norm' #'group_norm'
+  normalization: 'instance_norm' #'group_norm'
   use_greedy_saving: false
   target_metric_name: 'dice_score'
 
 dataset:
   save_best_val_predictions: true
   trim_background: true  
-  patch_overlap: 0.8 
+  patch_overlap: 0.8
   
   features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
-  root: '/nfs/tom/ibulygin/fcd_data/tensors_MNI152'
-  metadata_path: 'metadata/metadata_fcd.npy'
+  add_xyz: true
+  root: '/nfs/tom/ibulygin/fcd_data/tensors_nG'
+  metadata_path: 'metadata/metadata_fcd_nG.npy'
   dataset_type: 'fcd'
 
-  # features: ['t1', 't1ce', 't2', 'flair'] # BRATS
-  # root: '/media/tom/ibulygin/fcd_data/brats2020_tensors' 
-  # dataset_type: 'brats_patches_tio'
+  # features: ['t1', 't1ce', 't2', 'flair']
+  # root: '/nfs/tom/ibulygin/fcd_data/brats2020_tensors'
+  # metadata_path: 'metadata/metadata_brats2020.npy'
+  # dataset_type: 'brats'
 
-  sampler_type_train: 'balanced'
+  sampler_type_train: 'balanced' #'balanced'
   sampler_type_val: 'grid'
+  
   label_ratio: 0.5
   patches_per_brain: 500
   patch_size : 64
   shuffle_train: true
   patch_batch_size : 8
-  
