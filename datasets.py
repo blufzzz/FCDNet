@@ -94,15 +94,14 @@ def BalancedSampler(subject, patch_size, patches_per_brain, patch_batch_size, la
     y = torch.cat([torch.zeros(N_neg_subsample), torch.ones(N_pos_subsample)])
     X = torch.cat([neg_coords_subsample, pos_coords_subsample])
 
-
     bp_dataset = BrainPatchesDataset(brain, mask, label, X, y, patch_size)
     sampler = StratifiedSampler(y, patch_batch_size)
 
     loader = DataLoader(bp_dataset, 
-                              batch_size=patch_batch_size,
-                              shuffle=False, 
-                              sampler=sampler, 
-                              num_workers=4)
+                        batch_size=patch_batch_size,
+                          shuffle=False, 
+                          sampler=sampler, 
+                          num_workers=4)
 
     return loader
 
@@ -151,17 +150,17 @@ class Brats2020Dataset(Dataset):
 def add_xyz(input, mask):
 
     '''
-    input - [C,H,W,D]
+    input - [bs,C,H,W,D]
     '''
 
-    _,X,Y,Z = input.shape
+    bs,C,X,Y,Z = input.shape
 
     xyz_grid = torch.tensor(np.stack(np.meshgrid(np.arange(X)/X, 
                             np.arange(Y)/Y, 
                             np.arange(Z)/Z, 
-                            indexing='ij'), 0), dtype=input.dtype).to(input.device)
+                            indexing='ij'), 0), dtype=input.dtype).to(input.device).unsqueeze(0)
 
-    return torch.cat([xyz_grid,input],0) * mask
+    return torch.cat([xyz_grid,input],1) * mask
 
 
 class BrainMaskDataset(Dataset):
@@ -172,7 +171,6 @@ class BrainMaskDataset(Dataset):
         self.train = train
         self.trim_background = config.trim_background
         self.metadata_path = config.metadata_path
-        self.add_xyz = config.add_xyz
 
         self.metadata = np.load(self.metadata_path, allow_pickle=True).item()
         metadata_key = 'train' if self.train else 'test'
@@ -200,9 +198,9 @@ class BrainMaskDataset(Dataset):
                                                                              label_tensor_torch,
                                                                              mask_tensor_torch)
 
-        return brain_tensor_torch, \
-                mask_tensor_torch.unsqueeze(0), \
-                label_tensor_torch.unsqueeze(0)
+        return brain_tensor_torch,\
+               mask_tensor_torch.unsqueeze(0),\
+               label_tensor_torch.unsqueeze(0)
 
     def __len__(self):
         return len(self.labels)

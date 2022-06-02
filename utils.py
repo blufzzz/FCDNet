@@ -12,6 +12,18 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 
+def calc_gradient_norm(named_parameters):
+    total_norm = 0.0
+    for name, p in named_parameters:
+        # print(name)
+        param_norm = p.grad.data.norm(2)
+        total_norm += param_norm.item() ** 2
+
+    total_norm = total_norm ** (1. / 2)
+
+    return total_norm
+
+
 def get_capacity(model):
     s_total = 0
     for param in model.parameters():

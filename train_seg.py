@@ -14,20 +14,27 @@ from torch import autograd
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from utils import save, parse_args, get_capacity
+from utils import save, parse_args, get_capacity, calc_gradient_norm
 from models.v2v import V2VModel
 from models.unet3d import UnetModel
 import torchio as tio
 from datasets import create_datasets
 import yaml
 from easydict import EasyDict as edict
-from losses import focal_tversky_loss, DiceScoreBinary, DiceLossBinary
+from losses import DiceScoreBinary,\
+                   DiceLossBinary,\
+                   symmetric_focal_loss,\
+                sym_unified_focal_loss,\
+                symmetric_focal_tversky_loss,\
+                DiceSFL,\
+                tversky_loss
 from torch.cuda.amp import autocast
 
 # enable cuDNN benchmark
-torch.backends.cudnn.benchmark = True
+
+# torch.backends.cudnn.benchmark = True
 # torch.use_deterministic_algorithms(True)
-torch.manual_seed(42)
+# torch.manual_seed(42)
 
 def one_epoch(model, 
                 criterion, 
@@ -44,7 +51,8 @@ def one_epoch(model,
 
 
     # use amp to accelerate training
-    scaler = torch.cuda.amp.GradScaler()
+    if config.opt.use_scaler:
+        scaler = torch.cuda.amp.GradScaler()
 
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
@@ -62,7 +70,7 @@ def one_epoch(model,
         iterator = enumerate(dataloader)
         val_predictions = {}
         for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
-            
+
             t1 = time.time()
 
             if (augmentation is not None) and is_train:
@@ -78,42 +86,48 @@ def one_epoch(model,
                 label_tensor = transformed['label'].tensor.unsqueeze(0)
                 mask_tensor = transformed['mask'].tensor.unsqueeze(0)
 
+                brain_tensor = brain_tensor*mask_tensor
+                label_tensor = label_tensor*mask_tensor
+
+
             if config.interpolate:
                 brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
                 label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device)
-                mask_tensor = F.interpolate(mask_tensor.type(torch.float), config.interpolation_size).type(torch.bool).to(device)
+                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device)
             else:
                 brain_tensor = brain_tensor.to(device)
                 label_tensor = label_tensor.to(device)
                 mask_tensor = mask_tensor.to(device)
 
-
             # forward pass
-            with autocast():
+            with autocast(enabled=config.opt.use_scaler):
                 label_tensor_predicted = model(brain_tensor) # -> [bs,1,ps,ps,ps]
 
-            if config.opt.criterion == "BCE":
-                weights = torch.ones(label_tensor.shape).to(device)
-                weights[label_tensor > 0] = weights[label_tensor > 0]*config.opt.bce_weights
-                loss = criterion(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor)
-            elif config.opt.criterion == "DiceBCE":
-                weights = torch.ones(label_tensor.shape).to(device)
-                weights[label_tensor > 0] = weights[label_tensor > 0]*config.opt.bce_weights
-                loss = torch.nn.BCELoss(weight=weights, reduction='mean')(label_tensor_predicted, label_tensor) + \
-                                DiceLossBinary(label_tensor_predicted, label_tensor)
-            else:
                 loss = criterion(label_tensor_predicted, label_tensor) 
 
 
             if is_train:
                 opt.zero_grad()
 
-                # loss.backward()
-                # opt.step()
+                if config.opt.use_scaler:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 
-                scaler.scale(loss).backward() # loss.backward()
-                scaler.step(opt) # opt.step()
-                scaler.update()
+                if hasattr(config.opt, "grad_clip"):
+                    if config.opt.use_scaler:
+                        scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                           config.opt.grad_clip)
+
+                metric_dict['grad_norm'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
+                                                model.named_parameters())))
+
+                if config.opt.use_scaler:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
 
 
             t2 = time.time()    
@@ -132,7 +146,20 @@ def one_epoch(model,
             metric_dict['coverage'].append(coverage.item())
             metric_dict['dice_score'].append(dice_score.item())
 
-            print(f'Epoch: {epoch}, Iter: {iter_i}, Loss_{loss_name}: {loss.item()}, Dice-score: {dice_score.item()}, time: {np.round(dt,2)}-s')
+            #########
+            # PRINT #
+            #########
+            message = f'For {phase_name}, iter: {iter_i},'
+            for title, value in metric_dict.items():
+                if title == 'grad_norm':
+                    v = np.round(value[-1],6)
+                else:
+                    v = np.round(value[-1],3)
+                message+=f' {title}:{v}'
+            print(message)
+
+            # print(f'Epoch: {epoch}, Iter: {iter_i},\ 
+            # Loss_{loss_name}: {loss.item()}, Dice-score: {dice_score.item()}, time: {np.round(dt,2)}-s')
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -243,9 +270,17 @@ def main(args):
         "BCE":torch.nn.BCELoss, # [probabilities, target]
         "Dice":DiceLossBinary,
         "DiceBCE":None,
-        "FocalTversky":focal_tversky_loss(),
+        "DiceSFL": DiceSFL(delta=config.opt.delta, gamma=config.opt.gamma),
+        "TL": tversky_loss(delta=config.opt.delta),
+        "FTL": symmetric_focal_tversky_loss(delta=config.opt.delta, gamma=config.opt.gamma),
+        "SFL": symmetric_focal_loss(delta=config.opt.delta, gamma=config.opt.gamma),
+        "USFL":sym_unified_focal_loss(weight=config.opt.weight, # 0.5
+                                         delta=config.opt.delta,  # 0.6
+                                         gamma=config.opt.gamma) # 0.5
     }[config.opt.criterion]
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
+
+    # set_trace()
 
     ############
     # TRAINING #

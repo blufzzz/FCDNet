@@ -2,12 +2,14 @@ make_logs: true
 comment: "Percentile clipping for tensors_nG"
 
 opt:
-  device: 1
+  device: 3
   criterion: "SFL" #"Unified"
-  delta: 0.99 # 0.5
-  gamma: 2 # 0.6
+  delta: 0.999 # 0.5
+  gamma: 0 # 0.6
   weight: 0.5 # for USFL
- 
+  # grad_clip: 1
+  use_scaler: false
+
   start_epoch: 0
   n_epochs: 9999
 
@@ -25,6 +27,7 @@ model:
   max_channel_encoder_decoder: 128 
   sigmoid: true
   normalization: 'instance_norm' #'group_norm'
+  activation: 'LeakyReLU'
   use_greedy_saving: false
   target_metric_name: 'dice_score'
 
@@ -35,7 +38,8 @@ dataset:
   
   features: ['curv', 'sulc', 'thickness', 'bT1', 'bT2', 'T1w', 'CSF', 'GM', 'WM', 'cr', 'entropy'] 
   add_xyz: true
-  root: '/nfs/tom/ibulygin/fcd_data/tensors_nG'
+  # predictions_path: '/nfs/tom/ibulygin/FCDNet/logs/logs_nG/v2v128-IN_s128_bs1_GN_SFL-d0.9-g2-lr1e-3_nG-AUG-autocast@04.05.2022-19:53:34/predictions'
+  root: '/mnt/tom/ibulygin/fcd_data/tensors_nG' # chng tp /mnt/... for ws-*
   metadata_path: 'metadata/metadata_fcd_nG.npy'
   dataset_type: 'fcd'
 
@@ -50,5 +54,5 @@ dataset:
   label_ratio: 0.5
   patches_per_brain: 500
   patch_size : 64
-  shuffle_train: true
-  patch_batch_size : 8
+  shuffle_train: false
+  patch_batch_size : 6

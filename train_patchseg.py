@@ -21,12 +21,12 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchio as tio
 from losses import DiceScoreBinary, DiceLossBinary, sym_unified_focal_loss, compute_BCE, symmetric_focal_loss
-from utils import get_capacity, save, parse_args
+from utils import get_capacity, save, parse_args, calc_gradient_norm
 from models.v2v import V2VModel
 
 # enable cuDNN benchmark
 torch.backends.cudnn.benchmark = True
-torch.manual_seed(42)
+# torch.manual_seed(42)
 
 
 def one_epoch(model, 
@@ -43,7 +43,8 @@ def one_epoch(model,
                 is_train=True):
     
     # use amp to accelerate training
-    scaler = torch.cuda.amp.GradScaler()
+    if config.opt.use_scaler:
+        scaler = torch.cuda.amp.GradScaler()
 
     phase_name = 'train' if is_train else 'val'
     loss_name = config.opt.criterion
@@ -70,6 +71,7 @@ def one_epoch(model,
 
     # used to turn on/off gradients
     grad_context = torch.autograd.enable_grad if is_train else torch.no_grad
+
     with grad_context():
 
         # brain_tensor - [1,C,H,W,D]
@@ -92,7 +94,19 @@ def one_epoch(model,
             else:
                 print(f'Label: {label}', label_tensor.sum())
 
- 
+            # before augmentation!
+            if hasattr(config.dataset, 'predictions_path'):
+                assert not config.dataset.shuffle_train # to ensure we got the right label
+                pred = torch.load(os.path.join(config.dataset.predictions_path, label)).unsqueeze(0).unsqueeze(0)
+                # upsample prediction
+                pred = F.interpolate(pred, brain_tensor.shape[2:])
+                brain_tensor = torch.cat([brain_tensor, pred], 1) * mask_tensor
+
+
+            # before augmentation?
+            if config.dataset.add_xyz:
+                brain_tensor = add_xyz(brain_tensor, mask_tensor)
+            
             subject = tio.Subject(t1=tio.ScalarImage(tensor=brain_tensor[0]),
                               mask=tio.LabelMap(tensor=mask_tensor[0]),
                               label=tio.LabelMap(tensor=label_tensor[0])) 
@@ -100,17 +114,14 @@ def one_epoch(model,
             if is_train and (augmentation is not None):
                 subject = augmentation(subject)
 
-            if config.dataset.add_xyz:
-                subject['t1'].set_data(add_xyz(subject['t1'].data, subject['mask'].data))
 
             if sampler_type == 'grid':
                 grid_sampler = tio.inference.GridSampler(subject, patch_size, pov)
-                patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=patch_batch_size, shuffle=True)
+                patch_loader = torch.utils.data.DataLoader(grid_sampler, 
+                                                           batch_size=patch_batch_size,
+                                                           shuffle=True)
                 aggregator = tio.inference.GridAggregator(grid_sampler, overlap_mode='average')
-                
-                targets_patches = [] # if patch contains fcd
-                preds_patches = [] # if fcd predicted in patch
-                probs_patches = [] # patch fcd confidence
+
 
             elif sampler_type == 'balanced':
                 patch_loader = BalancedSampler(subject, 
@@ -123,6 +134,10 @@ def one_epoch(model,
             # ITERATE OVER PATCHES #
             ##############################################################################
             metric_dict_patch = defaultdict(list)
+            targets_patches = [] # if patch contains fcd
+            preds_patches = [] # if fcd predicted in patch
+            probs_patches = [] # patch fcd confidence
+            hits_patches = [] # hitrate 
             print(f'Iterating for {label}, {len(patch_loader)}')
             for patch_i, patches_batch in enumerate(tqdm(patch_loader)):
 
@@ -134,57 +149,89 @@ def one_epoch(model,
                     inputs = inputs.to(device)
                     targets = targets.to(device)
 
-
-                with autocast():     
+                # with autograd.detect_anomaly():
+                with autocast(enabled=config.opt.use_scaler):     
                     logits = model(inputs)
 
-                if config.opt.criterion == "BCE":
-                    loss = compute_BCE(logits, targets, criterion, config)
-               
-                elif config.opt.criterion == "DiceBCE":
-                    loss = compute_BCE(logits, targets, criterion, config)
-                    loss += DiceLossBinary(logits, targets)
-                
-                else:
+                    # if config.opt.criterion == "BCE":
+                    #     loss = compute_BCE(logits, targets, config)
+                   
+                    # elif config.opt.criterion == "DiceBCE":
+                    #     loss = compute_BCE(logits, targets, config)
+                    #     loss += DiceLossBinary(logits, targets)
+                    
+                    # else:
+                    
                     loss = criterion(logits, targets) # [bs,1,p,p,p], [bs,1,p,p,p]
 
-                
+                metric_dict_patch[f'{config.opt.criterion}'].append(loss.item())
+
                 if is_train:
                     opt.zero_grad()
-                    scaler.scale(loss).backward() # loss.backward()
-                    scaler.step(opt) # opt.step()
-                    scaler.update()
+                    
+                    if config.opt.use_scaler:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+
+                    if hasattr(config.opt, "grad_clip"):
+                        if config.opt.use_scaler:
+                            scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                       config.opt.grad_clip)
+
+                    metric_dict_patch['grad_norm'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
+                                                  model.named_parameters())))
+                    
+                    
+                    if config.opt.use_scaler:
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        opt.step()
+
 
                 # casting back to patch
                 if sampler_type == 'grid':
                     locations = patches_batch[tio.LOCATION]
                     aggregator.add_batch(logits.detach(), locations)
 
-                    ####################
-                    # HIT-RATE METRICS #
-                    ####################
+                ####################
+                # HIT-RATE METRICS #
+                ####################
 
-                    targets_sum = targets.sum((-1,-2,-3)) # [bs,1]
-                    targets_ =  targets_sum > 0
-                    targets_ = targets_.squeeze(1).detach().cpu().numpy().astype(int)
-                    
-                    preds_ = (logits * targets).sum((-1,-2,-3)) > 0.01*targets_sum # hit = 1% intersection
-                    preds_ = preds_.squeeze(1).detach().cpu().numpy().astype(int)
-                    
-                    probs_ = logits.mean((-1,-2,-3)).squeeze(1).detach().cpu().numpy()
+                targets_sum = targets.sum((-1,-2,-3)) # [bs,1]
+                targets_ =  targets_sum > 0
+                targets_ = targets_.squeeze(1).detach().cpu().numpy().astype(int)
+                
+                hits_ = (logits * targets).sum((-1,-2,-3)) > 0.1*targets_sum # hit = 10% intersection
+                hits_ = hits_.squeeze(1).detach().cpu().numpy().astype(int)
+                probs_ = logits.mean((-1,-2,-3)).squeeze(1).detach().cpu().numpy()
+                preds_ = (probs_ > 0.5).astype(int)
 
-                    targets_patches.append(targets_)
-                    preds_patches.append(preds_)
-                    probs_patches.append(probs_)
+                targets_patches.append(targets_)
+                hits_patches.append(hits_)
+                probs_patches.append(probs_)
+                preds_patches.append(preds_)
 
                 #####################
                 # per-PATCH METRICS #
                 #####################
-                metric_dict_patch[f'{loss_name}'].append(loss.item())
+                coverage = (logits*targets).sum((-1,-2,-3)) / (targets.sum((-1,-2,-3)) + 1e-5)
+                dice_score = DiceScoreBinary(logits, targets).item()
+
+                metric_dict_patch[f'coverage'].append(coverage.mean().item())
+                metric_dict_patch[f'dice_score'].append(dice_score)
+
             
             ##############################################################################
             for k,v in metric_dict_patch.items():
                 metric_dict[k].append(np.mean(v))
+
+            targets_all=np.concatenate(targets_patches)
+            preds_all=np.concatenate(preds_patches)
+            probs_all=np.concatenate(probs_patches)
+            hits_all=np.concatenate(hits_patches)
 
 
             ##################
@@ -202,22 +249,6 @@ def one_epoch(model,
                 metric_dict['dice_score'].append(dice)
                 metric_dict['coverage'].append(coverage.item())
 
-                targets_all=np.concatenate(targets_patches)
-                preds_all=np.concatenate(preds_patches)
-                probs_all=np.concatenate(probs_patches)
-
-                accuracy = accuracy_score(targets_all, preds_all)
-                precision = precision_score(targets_all, preds_all, zero_division=0)
-                recall = recall_score(targets_all, preds_all, zero_division=0)
-                roc_auc = roc_auc_score(targets_all, probs_all, average='samples')
-                f1 = f1_score(targets_all, preds_all, average='weighted')
-
-                metric_dict['accuracy'].append(accuracy)
-                metric_dict['precision'].append(precision)
-                metric_dict['recall'].append(recall)
-                metric_dict['roc_auc_samples'].append(roc_auc)
-                metric_dict['f1_weighted'].append(f1)
-
                 ###########
                 # HITRATE #
                 ###########
@@ -228,15 +259,37 @@ def one_epoch(model,
                     hitrate = top_k_fcd.mean()
                     metric_dict[f'top-{top_k}_hitrate'].append(hitrate)
 
-            if not is_train:
-                val_predictions[label] = output_tensor.detach().cpu().numpy()
+                if not is_train:
+                    val_predictions[label] = output_tensor.detach().cpu().numpy()
+
+            
+            try:
+                accuracy = accuracy_score(targets_all, preds_all)
+                precision = precision_score(targets_all, preds_all, zero_division=0)
+                recall = recall_score(targets_all, preds_all, zero_division=0)
+                roc_auc = roc_auc_score(targets_all, probs_all, average='samples')
+                hitrate = (hits_all*targets_all).sum() / targets_all.sum()
+            except Exception as e:
+                print(e,' - error during sklearn metrics calculation!')
+                accuracy, precision, recall, roc_auc, hitrate = 0,0,0,0,0
+                pass
+
+            metric_dict['accuracy'].append(accuracy)
+            metric_dict['precision'].append(precision)
+            metric_dict['recall'].append(recall)
+            metric_dict['roc_auc_samples'].append(roc_auc)
+            metric_dict['hitrate_0.1'].append(hitrate)
+
 
             #########
             # PRINT #
             #########
             message = f'For {phase_name}, {label},'
             for title, value in metric_dict.items():
-                v = np.round(value[-1],3)
+                if title == 'grad_norm_times_lr':
+                    v = np.round(value[-1],6)
+                else:
+                    v = np.round(value[-1],3)
                 message+=f' {title}:{v}'
             print(message)
 
@@ -312,7 +365,7 @@ def main(args):
     print(f'Model created! Capacity: {model_capacity}')
 
     if hasattr(config.model, 'weights'):
-        model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
+        model_dict = torch.load(config.model.weights)
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
         model.load_state_dict(model_dict['model_state'])
 
@@ -345,7 +398,7 @@ def main(args):
                                  center='image',
                                  default_pad_value=0)
         rescale = tio.RescaleIntensity(out_min_max=(0, 1))
-        augmentation = tio.Compose([symmetry, blur, noise, affine, rescale])
+        augmentation = tio.Compose([symmetry, noise, blur, affine, rescale])
 
     ################
     # CREATE OPTIM #
@@ -355,7 +408,7 @@ def main(args):
         "BCE": nn.BCELoss,
         "DiceBCE":None,
         "SFL": symmetric_focal_loss(delta=config.opt.delta, gamma=config.opt.gamma),
-        "Unified":sym_unified_focal_loss(weight=config.opt.weight, # 0.5
+        "USFL":sym_unified_focal_loss(weight=config.opt.weight, # 0.5
                                          delta=config.opt.delta,  # 0.6
                                          gamma=config.opt.gamma) # 0.5
     }[config.opt.criterion] 
