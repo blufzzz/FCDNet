@@ -6,3 +6,5 @@ patches
 environment.yml
 *.log
 *.swp
+MONAI_TMP/
+
