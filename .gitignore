@@ -1,7 +1,6 @@
 .ipynb_checkpoints
 logs*
 __pycache__/
-*.npy
 patches
 environment.yml
 *.log
