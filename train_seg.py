@@ -1,54 +1,40 @@
+from datetime import datetime
+import re, time, os, shutil, json
+import numpy as np
+import tempfile
+import configdot
+import traceback
+
+from collections import defaultdict
 from tensorboardX import SummaryWriter  
 from IPython.core.debugger import set_trace
-import traceback
-from datetime import datetime
-import os
-import shutil
-import time
-from collections import defaultdict
-import pickle
-import numpy as np
+
 import torch
-from torch import nn
-from torch import autograd
 import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from utils import save, parse_args, get_capacity, calc_gradient_norm
-from models.v2v import V2VModel
-from models.unet3d import UnetModel
-import torchio as tio
-from datasets import create_datasets
-import yaml
-from easydict import EasyDict as edict
-from losses import DiceScoreBinary,\
-                   DiceLossBinary,\
-                   symmetric_focal_loss,\
-                sym_unified_focal_loss,\
-                symmetric_focal_tversky_loss,\
-                DiceSFL,\
-                tversky_loss
 from torch.cuda.amp import autocast
+import torch.optim as optim
+from models.v2v import V2VModel
+
+from losses import *
+from dataset import setup_dataloaders
+from utils import save, get_capacity, calc_gradient_norm, get_label
 
 # enable cuDNN benchmark
-
 # torch.backends.cudnn.benchmark = True
 # torch.use_deterministic_algorithms(True)
 # torch.manual_seed(42)
 
 def one_epoch(model, 
-                criterion, 
-                opt, 
-                config, 
-                dataloader, 
-                device, 
-                writer, 
-                epoch, 
-                metric_dict_epoch, 
-                n_iters_total=0,
-                augmentation=None, 
-                is_train=True):
-
+              criterion, 
+              opt,
+              config, 
+              dataloader, 
+              device, 
+              writer, 
+              epoch, 
+              metric_dict_epoch, 
+              n_iters_total=0,
+              is_train=True):
 
     # use amp to accelerate training
     if config.opt.use_scaler:
@@ -69,42 +55,23 @@ def one_epoch(model,
     with grad_context():
         iterator = enumerate(dataloader)
         val_predictions = {}
-        for iter_i, (brain_tensor, mask_tensor, label_tensor) in iterator:
+        for iter_i, data_tensors in iterator:
+            
+            # ##################
+            # if iter_i > 2:
+            #     break
+            # ##################
+            
+            brain_tensor, label_tensor = data_tensors['image'], data_tensors['seg']
 
-            t1 = time.time()
-
-            if (augmentation is not None) and is_train:
-                subject = tio.Subject(
-                    t1=tio.ScalarImage(tensor=brain_tensor[0]),
-                    label=tio.LabelMap(tensor=label_tensor[0]),
-                    mask=tio.LabelMap(tensor=mask_tensor[0]),
-                    diagnosis='positive'
-                )
-
-                transformed = augmentation(subject)
-                brain_tensor = transformed['t1'].tensor.unsqueeze(0)
-                label_tensor = transformed['label'].tensor.unsqueeze(0)
-                mask_tensor = transformed['mask'].tensor.unsqueeze(0)
-
-                brain_tensor = brain_tensor*mask_tensor
-                label_tensor = label_tensor*mask_tensor
-
-
-            if config.interpolate:
-                brain_tensor = F.interpolate(brain_tensor, config.interpolation_size).to(device)
-                label_tensor = F.interpolate(label_tensor, config.interpolation_size).to(device)
-                mask_tensor = F.interpolate(mask_tensor, config.interpolation_size).to(device)
-            else:
-                brain_tensor = brain_tensor.to(device)
-                label_tensor = label_tensor.to(device)
-                mask_tensor = mask_tensor.to(device)
+            brain_tensor = brain_tensor.to(device)
+            label_tensor = label_tensor.to(device)
 
             # forward pass
+            t1 = time.time()
             with autocast(enabled=config.opt.use_scaler):
                 label_tensor_predicted = model(brain_tensor) # -> [bs,1,ps,ps,ps]
-
                 loss = criterion(label_tensor_predicted, label_tensor) 
-
 
             if is_train:
                 opt.zero_grad()
@@ -129,23 +96,27 @@ def one_epoch(model,
                 else:
                     opt.step()
 
-
             t2 = time.time()    
             dt = t2-t1 # inference time
             
             metric_dict[f'batch_time'].append(dt)
             metric_dict[f'{loss_name}'].append(loss.item())
-            label_tensor_predicted = label_tensor_predicted*mask_tensor
-            dice_score = DiceScoreBinary(label_tensor_predicted, label_tensor)
-            coverage = (label_tensor_predicted*label_tensor).sum() / label_tensor.sum()
             
-            if not is_train:
-                label = dataloader.dataset.labels[iter_i]
+            cov = coverage(label_tensor_predicted, label_tensor).item()
+            fp = false_positive(label_tensor_predicted, label_tensor).item()
+            fn = false_negative(label_tensor_predicted, label_tensor).item()
+            dice = dice_score(label_tensor_predicted, label_tensor).item()
+            
+            if not is_train and config.dataset.save_best_val_predictions:
+                label = get_label(dataloader.dataset.data[iter_i]['seg'])
+                # label = dataloader.dataset.data[iter_i]['seg'].split('/')[6].split('.')[0]
                 val_predictions[label] = label_tensor_predicted.detach().cpu().numpy()
             
-            metric_dict['coverage'].append(coverage.item())
-            metric_dict['dice_score'].append(dice_score.item())
-
+            metric_dict[''].append(cov) # a.k.a recall
+            metric_dict['false_positive'].append(fp)
+            metric_dict['false_negative'].append(fn)
+            metric_dict['dice_score'].append(dice)
+            
             #########
             # PRINT #
             #########
@@ -158,8 +129,9 @@ def one_epoch(model,
                 message+=f' {title}:{v}'
             print(message)
 
-            # print(f'Epoch: {epoch}, Iter: {iter_i},\ 
-            # Loss_{loss_name}: {loss.item()}, Dice-score: {dice_score.item()}, time: {np.round(dt,2)}-s')
+            # print(f'Epoch: {epoch}, Iter: {iter_i}, \n \
+            #         Loss_{loss_name}: {loss.item()}, Dice-score: {dice}, \n \
+            #         time: {np.round(dt,2)}-s')
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -175,7 +147,7 @@ def one_epoch(model,
             target_metric = m
         if writer is not None:
             writer.add_scalar(f"{phase_name}_{title}_epoch", m, epoch)
-
+            
     #####################
     # SAVING BEST PREDS #
     #####################
@@ -185,52 +157,65 @@ def one_epoch(model,
             # use greedy-saving: save only if the target metric is improved
             if len(target_metrics_epoch) == 1 or target_metrics_epoch[-1] >= target_metrics_epoch[-2]:
                 for label, pred in val_predictions.items():
-                        torch.save(pred,
-                                    os.path.join(config.dataset.val_preds_path, f'{label}'))
-
+                    torch.save(pred, os.path.join(config.dataset.val_preds_path, f'{label}'))
 
     return n_iters_total, target_metric
 
+
 def main(args):
+    
+    config = configdot.parse_config('configs/config.ini')
+    
+    ##################
+    # SETTING DEVICE #
+    ##################
+    print(torch.cuda.is_available())
+    DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
+    device = torch.device(DEVICE)
+    torch.cuda.set_device(DEVICE)
 
-    print(f'Available devices: {torch.cuda.device_count()}')
-    with open(args.config) as fin:
-        config = edict(yaml.safe_load(fin))
+    print('Setting GPU#:', DEVICE)
+    print('Using GPU#:', torch.cuda.current_device())
 
+    BASE_DIR = '/workspace/RawData/Features'
+    OUTPUT_DIR = '/workspace/RawData/Features/BIDS'
+    TMP_DIR = '/workspace/Features/tmp'
+    
     ##########
     # LOGDIR #
     ##########
-    MAKE_LOGS = config.make_logs
+    MAKE_LOGS = config.default.make_logs
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
-    DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
-    device = torch.device(DEVICE)
 
-    experiment_name = '{}@{}'.format(args.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H:%M:%S"))
+    experiment_name = '{}@{}'.format(config.default.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H"))
     print("Experiment name: {}".format(experiment_name))
 
     writer = None
     if MAKE_LOGS:
-        experiment_dir = os.path.join(args.logdir, experiment_name)
+        # create experiment dir
+        experiment_dir = os.path.join(config.default.log_dir, experiment_name)
         if os.path.isdir(experiment_dir):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
-        shutil.copy(args.config, os.path.join(experiment_dir, "config.yaml"))
+        shutil.copy('configs/config.ini', os.path.join(experiment_dir, "config.ini"))
+
+        # create dir for best_val_predictions
         if config.dataset.save_best_val_predictions:
             val_preds_path = os.path.join(experiment_dir, 'best_val_preds')
             config.dataset.val_preds_path = val_preds_path
             os.makedirs(val_preds_path)
 
-        writer = SummaryWriter(os.path.join(experiment_dir, "tb")) 
-    
+        writer = SummaryWriter(os.path.join(experiment_dir, "tb"))
+
     #########
     # MODEL #
     #########
     if config.model.name == "v2v":
         model = V2VModel(config).to(device)
-    elif config.model.name == "unet3d":
-        model = UnetModel(config).to(device)
-    capacity = get_capacity(model)
+    else:
+        raise NotImplementedError
 
+    capacity = get_capacity(model)
     print(f'Model created! Capacity: {capacity}')
 
     if hasattr(config.model, 'weights'):
@@ -238,53 +223,30 @@ def main(args):
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
         model.load_state_dict(model_dict['model_state'])
 
-    ##################
-    # CREATE DATASETS #
-    ###################
-    train_dataset, val_dataset = create_datasets(config)
-    train_dataloader = DataLoader(train_dataset, batch_size=config.opt.train_batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=config.opt.val_batch_size, shuffle=False)
-    # for the proper torchio augmentation
-    assert config.opt.train_batch_size == 1
-    assert config.opt.val_batch_size == 1
-    print(len(train_dataloader), len(val_dataloader))
-
-
-    transform = None
-    if config.opt.augmentation:
-        symmetry = tio.RandomFlip(axes=0) 
-        noise = tio.RandomNoise(std=(0,1e-2))
-        blur = tio.RandomBlur((0,1e-2))
-        affine = tio.RandomAffine(scales=(0.95, 1.05, 0.95, 1.05, 0.95, 1.05), 
-                                 degrees=3,
-                                 translation=(1,1,1),
-                                 center='image',
-                                 default_pad_value=0)
-        rescale = tio.RescaleIntensity(out_min_max=(0, 1))
-        transform = tio.Compose([symmetry, blur, noise, affine, rescale])
-
     ################
     # CREATE OPTIM #
     ################
     criterion = {
-        "BCE":torch.nn.BCELoss, # [probabilities, target]
-        "Dice":DiceLossBinary,
-        "DiceBCE":None,
-        "DiceSFL": DiceSFL(delta=config.opt.delta, gamma=config.opt.gamma),
+        "BCE":bce_weighted(delta=config.opt.delta), # [probabilities, target]
+        "Dice":dice_loss_custom,
+        "DiceSFL": dice_sfl(delta=config.opt.delta, gamma=config.opt.gamma),
         "TL": tversky_loss(delta=config.opt.delta),
-        "FTL": symmetric_focal_tversky_loss(delta=config.opt.delta, gamma=config.opt.gamma),
+        "FTL": focal_tversky_loss(delta=config.opt.delta, gamma=config.opt.gamma),
         "SFL": symmetric_focal_loss(delta=config.opt.delta, gamma=config.opt.gamma),
-        "USFL":sym_unified_focal_loss(weight=config.opt.weight, # 0.5
-                                         delta=config.opt.delta,  # 0.6
-                                         gamma=config.opt.gamma) # 0.5
+        "USFL": sym_unified_focal_loss(weight=config.opt.weight,
+                                         delta=config.opt.delta,
+                                         gamma=config.opt.gamma)
     }[config.opt.criterion]
+
+
     opt = optim.Adam(model.parameters(), lr=config.opt.lr)
+    
+    
+    ######################
+    # CREATE DATALOADERS #
+    ######################
+    train_loader, val_loader = setup_dataloaders(config)
 
-    # set_trace()
-
-    ############
-    # TRAINING #
-    ############
     print('Start training!')
     metric_dict_epoch = defaultdict(list)
     n_iters_total_train = 0 
@@ -298,27 +260,25 @@ def main(args):
                                             criterion, 
                                             opt, 
                                             config, 
-                                            train_dataloader, 
+                                            train_loader, 
                                             device, 
                                             writer, 
                                             epoch, 
                                             metric_dict_epoch, 
                                             n_iters_total_train,
-                                            augmentation=transform,
                                             is_train=True)
-
+            
             print (f'VAL EPOCH: {epoch} ... ')
             n_iters_total_val, target_metric = one_epoch(model, 
                                             criterion, 
                                             opt, 
                                             config, 
-                                            val_dataloader, 
+                                            val_loader, 
                                             device, 
                                             writer, 
                                             epoch, 
                                             metric_dict_epoch, 
                                             n_iters_total_val,
-                                            augmentation=None,
                                             is_train=False)
 
             if SAVE_MODEL and MAKE_LOGS:
@@ -330,14 +290,16 @@ def main(args):
                     print(f'target_metric = {target_metric}, SAVING...')
                     save(experiment_dir, model, opt, epoch)
                     target_metric_prev = target_metric
+                    
     except Exception as e:
         print(traceback.format_exc())
         set_trace()
-        # keyboard interrupt
-        if MAKE_LOGS:
-            np.save(os.path.join(experiment_dir, 'metric_dict_epoch'), metric_dict_epoch)
 
 if __name__ == '__main__':
-    args = parse_args()
-    print("args: {}".format(args))
+    
+    os.makedirs('./MONAI_TMP', exist_ok=True)
+    os.environ['MONAI_DATA_DIRECTORY'] = "./MONAI_TMP"
+    directory = os.environ.get("MONAI_DATA_DIRECTORY")
+    root_dir = tempfile.mkdtemp() if directory is None else directory
+    args = None # everything in `config.ini` now
     main(args)

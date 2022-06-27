@@ -11,7 +11,6 @@ from celluloid import Camera
 import numpy as np
 from matplotlib import pyplot as plt
 
-
 def calc_gradient_norm(named_parameters):
     total_norm = 0.0
     for name, p in named_parameters:
@@ -96,7 +95,6 @@ def video_comparison(brains, masks=None, titles=None, n_slides=64):
 
 
 
-
 def trim(brain_tensor, label_tensor, mask_tensor=None):
 
     '''
@@ -135,57 +133,6 @@ def trim(brain_tensor, label_tensor, mask_tensor=None):
     return brain_tensor_trim, label_tensor_trim, mask_tensor_trim
 
 
-
-
-def create_dicts(root_label,
-                 feature_paths_templates,
-                 label_extractor, 
-                 broken_labels=None):
-
-    '''
-    feature_paths_templates - dict; feature_type:template
-    label_extractor - extracts label unique for each subj
-    t1:/sub-{label}/anat/
-    '''
-    
-    keys = [label_extractor(p) for p in os.listdir(root_label)]
-    
-    if broken_labels is not None:
-        keys = set(keys)-set(broken_labels)
-
-    paths_dict = defaultdict(dict)
-    for label in keys:
-        for feature_type, templates in feature_paths_templates.items():
-
-            if not isinstance(templates, list):
-                templates = [templates]
-
-            path = None
-            # try to find feature...
-            for template in templates:
-                paths = glob.glob(template.replace('{label}', label), recursive=True)
-
-                if len(paths) == 0: 
-                    continue # invalid template!
-                else:
-                    path = paths[0]
-                    if not os.path.isfile(path):
-                        path = None 
-                    else:
-                        # we found feature!
-                        break
-                            
-            if path is None:
-                print(f'No {feature_type} for {label}') # incomplete features set 
-                if label in paths_dict.keys():
-                    paths_dict.pop(label)
-                break
-
-            paths_dict[label][feature_type] = path
-
-    return paths_dict
-
-
 def normalize_(brain_tensor):
     return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
 
@@ -203,69 +150,19 @@ def normalize(brain_tensor, mask=None):
     
     return brain_tensor
 
-
-def load(path_dict):
-    results = {}
-    for k,v in path_dict.items():
-        results[k] = nibabel.load(v).get_fdata()
-    return results
-
-
-
-def check_patch(x,y,z,
-                mask_tensor, 
-                label_tensor, 
-                pad,
-                p_thresh=None):
-    
-    x1,x2 = x-pad, x+pad
-    y1,y2 = y-pad, y+pad
-    z1,z2 = z-pad, z+pad
-
-    if (np.array([x1,x2,y1,y2,z1,z2]) < 0).any():
-        return None
-
-    else:
-        volume_mask= mask_tensor[x1:x2,y1:y2,z1:z2]
-        p_mask = volume_mask.sum()/np.prod(volume_mask.shape)
-
-        if p_thresh is not None and p_mask < p_thresh:
-            return None
-
-        volume_label = label_tensor[x1:x2,y1:y2,z1:z2]
-        n_label = volume_label.sum()
-
-        patch_info = {'x':x,
-                      'y':y,
-                      'z':z,
-                      'p_mask':p_mask,
-                      'n_label':n_label}
-
-        return patch_info
-
-    
-    
-def pad_arrays(arrays_list, padding_size):
-    return [np.pad(array,((padding_size,padding_size),
-                                (padding_size,padding_size),
-                                (padding_size,padding_size))) for array in arrays_list]
+def get_label(path):
+    '''
+    Extracts label from path, e.g.:
+    '/workspace/RawData/Features/preprocessed_data/label_bernaskoni/n16.nii.gz' -> 'n16'
+    '''
+    return path.split('/')[-1].split('.')[0]
 
 
-
+def to_numpy(X):
+    return X.detach().cpu().numpy()
 
 def save(experiment_dir, model, opt, epoch):
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints") # , "{:04}".format(epoch)
     os.makedirs(checkpoint_dir, exist_ok=True)
     dict_to_save = {'model_state': model.state_dict(),'opt_state' : opt.state_dict(), 'epoch':epoch}
     torch.save(dict_to_save, os.path.join(checkpoint_dir, f"weights_{epoch}.pth"))
-
-
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--logdir", type=str, default="")
-    parser.add_argument('--experiment_comment', default='', type=str)
-    args = parser.parse_args()
-    return args
