@@ -24,33 +24,54 @@ TMP_DIR = '/workspace/Features/tmp'
 FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance']
 
 def assign_feature_maps(sub, feature):
+    '''
+    Mapping from `sub` and `feature` to the corresponding path
+    of feature that belongs ot this subject 
+    the list of possible paths may be returned instead 
+    of single path
+    '''
     global BASE_DIR
     global OUTPUT_DIR
     global TMP_DIR
     if feature == 'image':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t1_brain-final.nii.gz')
+        
     elif feature == 't2':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t2_brain-final.nii.gz')
+        
     elif feature == 'flair':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_fl_brain-final.nii.gz')
+        
     elif feature == 'blurring-t1':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T1.nii.gz')
+        
     elif feature == 'blurring-Flair':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_Flair.nii.gz')
+        
     elif feature == 'cr-t2':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii')
+        feature_map = [os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii'),
+                       os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii.gz')]
+        
     elif feature == 'cr-Flair':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii')
+        feature_map = [os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii'),
+                       os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii.gz')]
+                       
     elif feature == 'thickness':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'thickness_mni.nii')
+        
     elif feature == 'curv':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'curv_mni.nii')
+        
     elif feature == 'sulc':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sulc_mni.nii')
+        
     elif feature == 'variance':
-        feature_map = os.path.join(BASE_DIR, f'preprocessed_data', 'var', f'sub-{sub}_var.nii.gz')
+        # feature_map = os.path.join(BASE_DIR, f'preprocessed_data', 'var', f'sub-{sub}_var.nii.gz')
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Variance.nii.gz')
+        
     elif feature == 'mask':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t1_brain-final_mask.nii.gz')
+        
     return feature_map
 
 
@@ -67,14 +88,27 @@ def create_datafile(sub_list, feat_params):
     missing_files = defaultdict(list)
 
     for sub in sub_list:
+        
         images_per_sub = dict()
         images_per_sub['image'] = []
+        
         for feat in feat_params:
-            map_path = assign_feature_maps(sub, feat)
-            if os.path.isfile(map_path):
+            
+            proposed_map_paths = assign_feature_maps(sub, feat)
+            map_path = None # path of the `feat`
+            
+            # in case `proposed_map_paths` is single path
+            if not isinstance(proposed_map_paths, list):
+                proposed_map_paths = [proposed_map_paths]
+            
+            for proposed_map_path in proposed_map_paths:
+                if os.path.isfile(proposed_map_path):
+                    map_path = proposed_map_path
+            
+            if map_path is not None:
                 images_per_sub['image'].append(map_path)
             else:
-                missing_files['image'].append(map_path)
+                missing_files['image'].append(proposed_map_path)
         
         seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
         if os.path.isfile(seg_path):
@@ -99,15 +133,7 @@ def setup_datafiles(split_dict, config):
     val_list = split_dict.get('test')
     
     images_list = []
-    subject_list = []
     feat_params = config.dataset.features
-
-    for i in os.listdir(OUTPUT_DIR):
-        sub_ind = re.findall('-(.[a-zA-Z0-9]*|[0-9])', str(i))
-        # if sub_ind and not any(x in sub_ind[0] for x in matches): 
-        # subjects with 'n', 'G', 'NS', 'C' won't be included
-        if sub_ind:
-            subject_list.append(sub_ind[0])
     
     train_files, train_missing_files = create_datafile(train_list, feat_params)
     val_files, val_missing_files = create_datafile(val_list, feat_params)

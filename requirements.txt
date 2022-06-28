@@ -4,3 +4,4 @@ configdot
 celluloid==0.2.0
 monai==0.9.0
 torch==1.8.1
+matplotlib
