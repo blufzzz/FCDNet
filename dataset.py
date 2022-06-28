@@ -1,4 +1,5 @@
 import os, re
+from collections import defaultdict
 import numpy as np
 from monai.data import create_test_image_3d, list_data_collate, decollate_batch, pad_list_data_collate
 import monai
@@ -14,10 +15,13 @@ from monai.transforms import (
 )
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
+from IPython.core.debugger import set_trace
 
 BASE_DIR = '/workspace/RawData/Features'
 OUTPUT_DIR = '/workspace/RawData/Features/BIDS'
 TMP_DIR = '/workspace/Features/tmp'
+
+FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance']
 
 def assign_feature_maps(sub, feature):
     global BASE_DIR
@@ -50,6 +54,40 @@ def assign_feature_maps(sub, feature):
     return feature_map
 
 
+
+def create_datafile(sub_list, feat_params):
+    
+    '''
+    for each subject from `sub_list` 
+    collects corresponding features from `feat_params`
+    and segmentation mask
+    '''
+
+    files = []
+    missing_files = defaultdict(list)
+
+    for sub in sub_list:
+        images_per_sub = dict()
+        images_per_sub['image'] = []
+        for feat in feat_params:
+            map_path = assign_feature_maps(sub, feat)
+            if os.path.isfile(map_path):
+                images_per_sub['image'].append(map_path)
+            else:
+                missing_files['image'].append(map_path)
+        
+        seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
+        if os.path.isfile(seg_path):
+            images_per_sub['seg'] = seg_path
+        else:
+            missing_files['seg'].append(seg_path)
+            
+        files.append(images_per_sub)
+        
+    return files, missing_files
+
+
+
 def setup_datafiles(split_dict, config):
 
     '''
@@ -70,54 +108,24 @@ def setup_datafiles(split_dict, config):
         # subjects with 'n', 'G', 'NS', 'C' won't be included
         if sub_ind:
             subject_list.append(sub_ind[0])
-
-    train_subs_indcs = []
-    train_files = []
-
-    for sub in train_list:
-        images_per_sub = dict()
-        images_per_sub['image'] = []
-        for feat in feat_params:
-            map_path = assign_feature_maps(sub, feat)
-            if os.path.isfile(map_path):
-                images_per_sub['image'].append(map_path)
-            else:
-                print(f'No feature {feat} for sub {sub} in train data')
-                continue
-
-        if len(images_per_sub['image']) == len(feat_params):
-            seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
-            if os.path.isfile(seg_path):
-                images_per_sub['seg'] = seg_path
-            else:
-                continue
-            train_subs_indcs.append(sub)
-            train_files.append(images_per_sub)
-
-    val_subs_indcs = []
-    val_files = []
-
-    for sub in val_list:
-        images_per_sub = dict()
-        images_per_sub['image'] = []
-        for feat in feat_params:
-            map_path = assign_feature_maps(sub, feat)
-            if os.path.isfile(map_path):
-                images_per_sub['image'].append(map_path)
-            else:
-                print(f'No feature {feat} for sub {sub} in val data')
-                continue
-        if len(images_per_sub['image']) == len(feat_params):
-            seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
-            if os.path.isfile(seg_path):
-                images_per_sub['seg'] = seg_path
-            else:
-                print(f'No {seg_path} for sub {sub}')
-                continue
-            val_subs_indcs.append(sub)
-            val_files.append(images_per_sub)
-
+    
+    train_files, train_missing_files = create_datafile(train_list, feat_params)
+    val_files, val_missing_files = create_datafile(val_list, feat_params)
+    
     print(f"Train set length: {len(train_files)}\nTest set length: {len(val_files)}")
+    
+    # print missing files
+    total_missing_files = 0
+    for split_name, missing_files_dict  in {'train': train_missing_files, 
+                                            'val': val_missing_files}.items():
+        for feature_type, missing_features_list in missing_files_dict.items():
+    
+            print(f'{split_name} missing {feature_type}:')
+            for fpath in missing_features_list:
+                print(fpath)
+            total_missing_files += len(missing_features_list)
+    
+    assert total_missing_files == 0
     
     return train_files, val_files
     
