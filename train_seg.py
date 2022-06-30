@@ -18,6 +18,8 @@ from models.v2v import V2VModel
 from losses import *
 from dataset import setup_dataloaders
 from utils import save, get_capacity, calc_gradient_norm, get_label
+from monai.config import print_config
+print_config()
 
 # enable cuDNN benchmark
 # torch.backends.cudnn.benchmark = True
@@ -56,16 +58,11 @@ def one_epoch(model,
         iterator = enumerate(dataloader)
         val_predictions = {}
         for iter_i, data_tensors in iterator:
-            
-            # ##################
-            # if iter_i > 2:
-            #     break
-            # ##################
-            
-            brain_tensor, label_tensor = data_tensors['image'], data_tensors['seg']
-
-            brain_tensor = brain_tensor.to(device)
-            label_tensor = label_tensor.to(device)
+            brain_tensor, label_tensor, mask_tensor = (
+                                                        data_tensors['image'].to(device),
+                                                        data_tensors['seg'].to(device),
+                                                        data_tensors['mask'].to(device)
+                                                        )
 
             # forward pass
             t1 = time.time()
@@ -101,7 +98,7 @@ def one_epoch(model,
             
             metric_dict[f'batch_time'].append(dt)
             metric_dict[f'{loss_name}'].append(loss.item())
-            
+            label_tensor_predicted = label_tensor_predicted * mask_tensor
             cov = coverage(label_tensor_predicted, label_tensor).item()
             fp = false_positive(label_tensor_predicted, label_tensor).item()
             fn = false_negative(label_tensor_predicted, label_tensor).item()
@@ -109,7 +106,6 @@ def one_epoch(model,
             
             if not is_train and config.dataset.save_best_val_predictions:
                 label = get_label(dataloader.dataset.data[iter_i]['seg'])
-                # label = dataloader.dataset.data[iter_i]['seg'].split('/')[6].split('.')[0]
                 val_predictions[label] = label_tensor_predicted.detach().cpu().numpy()
             
             metric_dict['coverage'].append(cov) # a.k.a recall

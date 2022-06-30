@@ -11,7 +11,8 @@ from monai.transforms import (
     Resized, EnsureTyped, Compose, ScaleIntensityd, 
     AddChanneld, MapTransform, AsChannelFirstd, EnsureType, 
     Activations, AsDiscrete, RandCropByPosNegLabeld, 
-    RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined
+    RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined,
+    RandShiftIntensityd
 )
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
@@ -75,7 +76,62 @@ def assign_feature_maps(sub, feature):
     return feature_map
 
 
+def create_datafile(sub_list, feat_params, mask=False):
+    
+    '''
+    for each subject from `sub_list` 
+    collects corresponding features from `feat_params`
+    and segmentation mask
+    
+    mask : Bool,
+        Include mask key to output file
+    '''
 
+    files = []
+    missing_files = defaultdict(list)
+
+    for sub in sub_list:
+        
+        images_per_sub = dict()
+        images_per_sub['image'] = []
+        if mask:
+            images_per_sub['mask'] = []
+            mask_path = assign_feature_maps(sub, 'mask')    
+            if os.path.isfile(mask_path):
+                images_per_sub['mask'] = mask_path
+            else:
+                missing_files['mask'].append(mask_path)
+        
+        for feat in feat_params:
+            proposed_map_paths = assign_feature_maps(sub, feat)
+            map_path = None # path of the `feat`
+                
+            # in case `proposed_map_paths` is single path
+            if not isinstance(proposed_map_paths, list):
+                proposed_map_paths = [proposed_map_paths]
+            
+            for proposed_map_path in proposed_map_paths:
+                if os.path.isfile(proposed_map_path):
+                    map_path = proposed_map_path
+            
+            if map_path is not None:
+                images_per_sub['image'].append(map_path)
+            else:
+                missing_files['image'].append(proposed_map_path)
+        
+        seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
+        if os.path.isfile(seg_path):
+            images_per_sub['seg'] = seg_path
+        else:
+            missing_files['seg'].append(seg_path)
+            
+        files.append(images_per_sub)
+        
+    return files, missing_files
+
+
+
+"""
 def create_datafile(sub_list, feat_params):
     
     '''
@@ -119,7 +175,7 @@ def create_datafile(sub_list, feat_params):
         files.append(images_per_sub)
         
     return files, missing_files
-
+"""
 
 
 def setup_datafiles(split_dict, config):
@@ -135,8 +191,11 @@ def setup_datafiles(split_dict, config):
     images_list = []
     feat_params = config.dataset.features
     
-    train_files, train_missing_files = create_datafile(train_list, feat_params)
-    val_files, val_missing_files = create_datafile(val_list, feat_params)
+    # Flag to add mask as additional sequence to Subset
+    add_mask = config.dataset.trim_background
+    
+    train_files, train_missing_files = create_datafile(train_list, feat_params, mask=add_mask)
+    val_files, val_missing_files = create_datafile(val_list, feat_params, mask=add_mask)
     
     print(f"Train set length: {len(train_files)}\nTest set length: {len(val_files)}")
     
@@ -159,35 +218,43 @@ def setup_transformations(config):
     
     assert config.default.interpolate
     spatial_size_conf = tuple(config.default.interpolation_size)
+    # If mask also applied, mask should be added to keys, refactor logic later !
+    if config.dataset.trim_background:
+        keys=["image", "seg", "mask"]
+        sep_k=["seg", "mask"]
+    else:
+        keys=["image", "seg"]
+        sep_k=["seg"]
 
     if config.opt.augmentation:
         rot_range = config.opt.rotation_range
 
         train_transf = Compose(
             [
-                LoadImaged(keys=["image", "seg"]),
-                EnsureChannelFirstd(keys=["image", "seg"]),
-                RandRotated(keys=["image", "seg"], 
+                LoadImaged(keys=keys),
+                EnsureChannelFirstd(keys=keys),
+                RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
                             range_z=rot_range, 
                             prob=0.5),
-                RandFlipd(keys=["image", "seg"], prob=0.5, spatial_axis=0),
-                Resized(keys=["image", "seg"], spatial_size=spatial_size_conf, mode=('area', 'nearest')),
-                Spacingd(keys=['seg'], pixdim=1.0),
+                RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
+                Resized(keys=keys, spatial_size=spatial_size_conf, mode=('area', 'area', 'area')),
+                Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                EnsureTyped(keys=["image", "seg"], dtype=torch.float),
+                RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.9),
+                EnsureTyped(keys=keys, dtype=torch.float),
             ]
         )
 
         val_transf = Compose(
             [
-                LoadImaged(keys=["image", "seg"]),
-                EnsureChannelFirstd(keys=["image", "seg"]),
-                Resized(keys=["image", "seg"], spatial_size=spatial_size_conf, mode=('area', 'nearest')),
-                Spacingd(keys=['seg'], pixdim=1.0),
+                LoadImaged(keys=keys),
+                EnsureChannelFirstd(keys=keys),
+                Resized(keys=keys, spatial_size=spatial_size_conf, mode=('area', 'area', 'area')),
+                Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                EnsureTyped(keys=["image", "seg"], dtype=torch.float),
+                EnsureTyped(keys=keys, dtype=torch.float),
             ]
         )
 
