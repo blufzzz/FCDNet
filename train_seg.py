@@ -112,7 +112,7 @@ def one_epoch(model,
                 # label = dataloader.dataset.data[iter_i]['seg'].split('/')[6].split('.')[0]
                 val_predictions[label] = label_tensor_predicted.detach().cpu().numpy()
             
-            metric_dict[''].append(cov) # a.k.a recall
+            metric_dict['coverage'].append(cov) # a.k.a recall
             metric_dict['false_positive'].append(fp)
             metric_dict['false_negative'].append(fn)
             metric_dict['dice_score'].append(dice)
