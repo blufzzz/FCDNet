@@ -19,8 +19,6 @@ import torch
 from IPython.core.debugger import set_trace
 
 BASE_DIR = '/workspace/RawData/Features'
-OUTPUT_DIR = '/workspace/RawData/Features/BIDS'
-TMP_DIR = '/workspace/Features/tmp'
 
 FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance']
 
@@ -32,8 +30,6 @@ def assign_feature_maps(sub, feature):
     of single path
     '''
     global BASE_DIR
-    global OUTPUT_DIR
-    global TMP_DIR
     if feature == 'image':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t1_brain-final.nii.gz')
         
@@ -213,11 +209,19 @@ def setup_datafiles(split_dict, config):
     assert total_missing_files == 0
     
     return train_files, val_files
+
+
+# Masked input image with brain mask
+def masked(data_dict):
+    data_dict["image"] = data_dict["image"] * data_dict["mask"]
+    return data_dict
     
+
 def setup_transformations(config):
     
     assert config.default.interpolate
     spatial_size_conf = tuple(config.default.interpolation_size)
+    
     # If mask also applied, mask should be added to keys, refactor logic later !
     if config.dataset.trim_background:
         keys=["image", "seg", "mask"]
@@ -233,17 +237,18 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
+                masked,
+                #MaskIntensityd(keys=['image'], mask_key='mask')  # does the same as masked
                 RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
                             range_z=rot_range, 
                             prob=0.5),
                 RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
-                Resized(keys=keys, spatial_size=spatial_size_conf, mode=('area', 'area', 'area')),
+                Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.9),
-                EnsureTyped(keys=keys, dtype=torch.float),
+                #EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
 
@@ -251,10 +256,12 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                Resized(keys=keys, spatial_size=spatial_size_conf, mode=('area', 'area', 'area')),
+                masked,
+                #MaskIntensityd(keys=['image'], mask_key='mask')  # does the same as masked
+                Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                EnsureTyped(keys=keys, dtype=torch.float),
+                #EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
 
