@@ -12,7 +12,7 @@ from monai.transforms import (
     AddChanneld, MapTransform, AsChannelFirstd, EnsureType, 
     Activations, AsDiscrete, RandCropByPosNegLabeld, 
     RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined,
-    RandShiftIntensityd
+    RandShiftIntensityd, MaskIntensityd
 )
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
@@ -63,11 +63,45 @@ def assign_feature_maps(sub, feature):
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sulc_mni.nii')
         
     elif feature == 'variance':
-        # feature_map = os.path.join(BASE_DIR, f'preprocessed_data', 'var', f'sub-{sub}_var.nii.gz')
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Variance.nii.gz')
         
     elif feature == 'mask':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t1_brain-final_mask.nii.gz')
+        
+        #  Normalized feature maps
+        
+    elif feature == 'norm-blurring-t1':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Blurring_T1.nii.gz')
+        
+    elif feature == 'norm-blurring-flair':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Blurring_Flair.nii.gz')
+    
+    elif feature == 'norm-cr-t2':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-CR_T2.nii.gz')
+        
+    elif feature == 'norm-cr-flair':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-CR_Flair.nii.gz')
+        
+    elif feature == 'norm-variance':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Variance.nii.gz')
+        
+    #  Postprocessed feature maps
+        
+    elif feature == 'post-blurring-t1':
+        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Blurring_T1.nii.gz')
+        
+    elif feature == 'post-blurring-flair':
+        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Blurring_Flair.nii.gz')
+    
+    elif feature == 'post-cr-t2':
+        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-CR_T2.nii.gz')
+        
+    elif feature == 'post-cr-flair':
+        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-CR_Flair.nii.gz')
+        
+    elif feature == 'post-variance':
+        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Variance.nii.gz')
+        
         
     return feature_map
 
@@ -211,24 +245,18 @@ def setup_datafiles(split_dict, config):
     return train_files, val_files
 
 
-# Masked input image with brain mask
-def masked(data_dict):
-    data_dict["image"] = data_dict["image"] * data_dict["mask"]
-    return data_dict
-    
-
 def setup_transformations(config):
     
     assert config.default.interpolate
     spatial_size_conf = tuple(config.default.interpolation_size)
     
-    # If mask also applied, mask should be added to keys, refactor logic later !
-    if config.dataset.trim_background:
-        keys=["image", "seg", "mask"]
-        sep_k=["seg", "mask"]
-    else:
-        keys=["image", "seg"]
-        sep_k=["seg"]
+
+    #if config.dataset.trim_background:
+    keys=["image", "seg", "mask"]
+    sep_k=["seg", "mask"]
+    # else:
+    #     keys=["image", "seg"]
+    #     sep_k=["seg"]
 
     if config.opt.augmentation:
         rot_range = config.opt.rotation_range
@@ -237,8 +265,7 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                masked,
-                #MaskIntensityd(keys=['image'], mask_key='mask')  # does the same as masked
+                MaskIntensityd(keys=['image'], mask_key='mask'),
                 RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
@@ -248,7 +275,7 @@ def setup_transformations(config):
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                #EnsureTyped(keys=sep_k, dtype=torch.float),
+                EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
 
@@ -256,12 +283,11 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                masked,
-                #MaskIntensityd(keys=['image'], mask_key='mask')  # does the same as masked
+                MaskIntensityd(keys=['image'], mask_key='mask'),
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                #EnsureTyped(keys=sep_k, dtype=torch.float),
+                EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
 
