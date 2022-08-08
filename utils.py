@@ -11,6 +11,20 @@ from celluloid import Camera
 import numpy as np
 from matplotlib import pyplot as plt
 
+def get_latest_weights(logdir, number=None):
+    
+    checkpoints_path = os.path.join(logdir, 'checkpoints')
+    
+    if number is None:
+        checkpoints_names = os.listdir(checkpoints_path)
+        checkpoints_names = sorted(checkpoints_names, key=lambda x: int(re.findall('\d+', x)[0]))
+        checkpoint = checkpoints_names[-1]
+    else:
+        checkpoint = f'weights_{number}.pth'
+    
+    return os.path.join(checkpoints_path, checkpoint)
+
+
 def calc_gradient_norm(named_parameters):
     total_norm = 0.0
     for name, p in named_parameters:

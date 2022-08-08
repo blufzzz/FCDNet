@@ -22,6 +22,13 @@ BASE_DIR = '/workspace/RawData/Features'
 
 FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance']
 
+
+def masked_transform(data_dict):
+    # set_trace()
+    data_dict["image"] = data_dict["image"] * data_dict["mask"]
+    return data_dict
+
+
 def assign_feature_maps(sub, feature):
     '''
     Mapping from `sub` and `feature` to the corresponding path
@@ -213,6 +220,9 @@ def setup_datafiles(split_dict, config):
     '''
     split_dict - dict:{'train':[...], 
                        'test':[...]}, train-test split
+    returns: train_files, val_files: lists of dicts, corresponding to subjects
+    each dict in <>_files list looks like: 
+        {'image':[path_feature1, path_feature2,...], 'seg':segpath, 'mask':maskpath}
     '''
     
     train_list = split_dict.get('train')
@@ -247,10 +257,11 @@ def setup_datafiles(split_dict, config):
 
 def setup_transformations(config):
     
+    # assert False, 'Check mask mult!'
+    
     assert config.default.interpolate
     spatial_size_conf = tuple(config.default.interpolation_size)
     
-
     #if config.dataset.trim_background:
     keys=["image", "seg", "mask"]
     sep_k=["seg", "mask"]
@@ -275,6 +286,7 @@ def setup_transformations(config):
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
+                masked_transform,
                 EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
@@ -287,6 +299,7 @@ def setup_transformations(config):
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
+                masked_transform,
                 EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
