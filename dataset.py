@@ -20,7 +20,7 @@ from IPython.core.debugger import set_trace
 
 BASE_DIR = '/workspace/RawData/Features'
 
-FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance']
+FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance', 'entropy']
 
 def assign_feature_maps(sub, feature):
     '''
@@ -45,13 +45,14 @@ def assign_feature_maps(sub, feature):
     elif feature == 'blurring-Flair':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_Flair.nii.gz')
         
+    elif feature == 'blurring-t2':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T2.nii.gz')
+        
     elif feature == 'cr-t2':
-        feature_map = [os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii'),
-                       os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii.gz')]
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii.gz')
         
     elif feature == 'cr-Flair':
-        feature_map = [os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii'),
-                       os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii.gz')]
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_Flair.nii.gz')
                        
     elif feature == 'thickness':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'thickness_mni.nii')
@@ -65,43 +66,11 @@ def assign_feature_maps(sub, feature):
     elif feature == 'variance':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Variance.nii.gz')
         
+    elif feature == 'entropy':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Entropy.nii.gz')
+        
     elif feature == 'mask':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'sub-{sub}_t1_brain-final_mask.nii.gz')
-        
-        #  Normalized feature maps
-        
-    elif feature == 'norm-blurring-t1':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Blurring_T1.nii.gz')
-        
-    elif feature == 'norm-blurring-flair':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Blurring_Flair.nii.gz')
-    
-    elif feature == 'norm-cr-t2':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-CR_T2.nii.gz')
-        
-    elif feature == 'norm-cr-flair':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-CR_Flair.nii.gz')
-        
-    elif feature == 'norm-variance':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'norm-Variance.nii.gz')
-        
-    #  Postprocessed feature maps
-        
-    elif feature == 'post-blurring-t1':
-        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Blurring_T1.nii.gz')
-        
-    elif feature == 'post-blurring-flair':
-        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Blurring_Flair.nii.gz')
-    
-    elif feature == 'post-cr-t2':
-        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-CR_T2.nii.gz')
-        
-    elif feature == 'post-cr-flair':
-        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-CR_Flair.nii.gz')
-        
-    elif feature == 'post-variance':
-        feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Variance.nii.gz')
-        
         
     return feature_map
 
@@ -245,6 +214,11 @@ def setup_datafiles(split_dict, config):
     return train_files, val_files
 
 
+def mask_transform(data_dict):
+    data_dict["image"] = data_dict["image"] * data_dict["mask"]
+    return data_dict
+
+
 def setup_transformations(config):
     
     assert config.default.interpolate
@@ -265,7 +239,7 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                MaskIntensityd(keys=['image'], mask_key='mask'),
+                #MaskIntensityd(keys=['image'], mask_key='mask'),
                 RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
@@ -275,6 +249,7 @@ def setup_transformations(config):
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
+                mask_transform, 
                 EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
@@ -283,10 +258,11 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                MaskIntensityd(keys=['image'], mask_key='mask'),
+                #MaskIntensityd(keys=['image'], mask_key='mask'),
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
+                mask_transform,
                 EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )

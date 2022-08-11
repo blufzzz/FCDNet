@@ -215,7 +215,10 @@ def main(args):
     print(f'Model created! Capacity: {capacity}')
 
     if hasattr(config.model, 'weights'):
-        model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights.pth'))
+        #files = os.listdir(path)
+        #paths = [os.path.join(path, basename) for basename in files]
+        #weights_filename_latest = max(paths, key=os.path.getctime)
+        model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights_.pth'))
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
         model.load_state_dict(model_dict['model_state'])
 
