@@ -4,10 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from IPython.core.debugger import set_trace
 
-
 NORMALIZATION = 'batch_norm'
 ACTIVATION = 'ReLU'
-
 
 def normalization(out_planes):
     if NORMALIZATION == 'batch_norm':
@@ -28,7 +26,6 @@ def activation():
         return nn.LeakyReLU()
     else:
         raise RuntimeError('Wrong ACTIVATION')
-
 
 
 class Basic3DBlock(nn.Module):

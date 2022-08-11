@@ -63,7 +63,7 @@ def one_epoch(model,
                                                         data_tensors['seg'].to(device),
                                                         data_tensors['mask'].to(device)
                                                         )
-
+            
             # forward pass
             t1 = time.time()
             with autocast(enabled=config.opt.use_scaler):
