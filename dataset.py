@@ -49,6 +49,9 @@ def assign_feature_maps(sub, feature):
     elif feature == 'blurring-t1':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T1.nii.gz')
         
+    elif feature == 'blurring-t2':
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T2.nii.gz') # just addded
+        
     elif feature == 'blurring-Flair':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_Flair.nii.gz')
         
@@ -108,6 +111,9 @@ def assign_feature_maps(sub, feature):
         
     elif feature == 'post-variance':
         feature_map = os.path.join(BASE_DIR, f'postprocessing', f'sub-{sub}', f'post-Variance.nii.gz')
+    
+    else:
+        raise KeyError(f'Wrong feature_map name: {feature}!')
         
         
     return feature_map
@@ -166,53 +172,6 @@ def create_datafile(sub_list, feat_params, mask=False):
         
     return files, missing_files
 
-
-
-"""
-def create_datafile(sub_list, feat_params):
-    
-    '''
-    for each subject from `sub_list` 
-    collects corresponding features from `feat_params`
-    and segmentation mask
-    '''
-
-    files = []
-    missing_files = defaultdict(list)
-
-    for sub in sub_list:
-        
-        images_per_sub = dict()
-        images_per_sub['image'] = []
-        
-        for feat in feat_params:
-            
-            proposed_map_paths = assign_feature_maps(sub, feat)
-            map_path = None # path of the `feat`
-            
-            # in case `proposed_map_paths` is single path
-            if not isinstance(proposed_map_paths, list):
-                proposed_map_paths = [proposed_map_paths]
-            
-            for proposed_map_path in proposed_map_paths:
-                if os.path.isfile(proposed_map_path):
-                    map_path = proposed_map_path
-            
-            if map_path is not None:
-                images_per_sub['image'].append(map_path)
-            else:
-                missing_files['image'].append(proposed_map_path)
-        
-        seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
-        if os.path.isfile(seg_path):
-            images_per_sub['seg'] = seg_path
-        else:
-            missing_files['seg'].append(seg_path)
-            
-        files.append(images_per_sub)
-        
-    return files, missing_files
-"""
 
 
 def setup_datafiles(split_dict, config):
@@ -276,7 +235,7 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                MaskIntensityd(keys=['image'], mask_key='mask'),
+                # MaskIntensityd(keys=['image'], mask_key='mask'), 
                 RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
@@ -295,7 +254,7 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                MaskIntensityd(keys=['image'], mask_key='mask'),
+                # MaskIntensityd(keys=['image'], mask_key='mask'),
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
