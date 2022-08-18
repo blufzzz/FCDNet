@@ -14,6 +14,7 @@ from monai.transforms import (
     RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined,
     RandShiftIntensityd, MaskIntensityd
 )
+
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
 from IPython.core.debugger import set_trace
@@ -22,11 +23,6 @@ BASE_DIR = '/workspace/RawData/Features'
 
 FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance', 'entropy']
 
-
-def masked_transform(data_dict):
-    # set_trace()
-    data_dict["image"] = data_dict["image"] * data_dict["mask"]
-    return data_dict
 
 
 def assign_feature_maps(sub, feature):
@@ -50,13 +46,10 @@ def assign_feature_maps(sub, feature):
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T1.nii.gz')
         
     elif feature == 'blurring-t2':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T2.nii.gz') # just addded
+        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T2.nii.gz')
         
     elif feature == 'blurring-Flair':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_Flair.nii.gz')
-        
-    elif feature == 'blurring-t2':
-        feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'Blurring_T2.nii.gz')
         
     elif feature == 'cr-t2':
         feature_map = os.path.join(BASE_DIR, f'prep_wf', f'sub-{sub}', f'CR_T2.nii.gz')
@@ -180,10 +173,11 @@ def setup_datafiles(split_dict, config):
     return train_files, val_files
 
 
-def mask_transform(data_dict):
-    data_dict["image"] = data_dict["image"] * data_dict["mask"]
-    return data_dict
 
+def mask_transform(data_dict):
+    data_dict["mask"] = (data_dict["mask"] > 0).astype(data_dict["image"].dtype)
+    data_dict["image"] = data_dict["image"] * (data_dict["mask"])
+    return data_dict
 
 def setup_transformations(config):
     
@@ -192,12 +186,9 @@ def setup_transformations(config):
     assert config.default.interpolate
     spatial_size_conf = tuple(config.default.interpolation_size)
     
-    #if config.dataset.trim_background:
+    assert config.dataset.trim_background
     keys=["image", "seg", "mask"]
     sep_k=["seg", "mask"]
-    # else:
-    #     keys=["image", "seg"]
-    #     sep_k=["seg"]
 
     if config.opt.augmentation:
         rot_range = config.opt.rotation_range
@@ -206,7 +197,6 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                #MaskIntensityd(keys=['image'], mask_key='mask'),
                 RandRotated(keys=keys, 
                             range_x=rot_range, 
                             range_y=rot_range, 
@@ -225,7 +215,6 @@ def setup_transformations(config):
             [
                 LoadImaged(keys=keys),
                 EnsureChannelFirstd(keys=keys),
-                #MaskIntensityd(keys=['image'], mask_key='mask'),
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
                 ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
@@ -238,7 +227,6 @@ def setup_transformations(config):
         raise NotImplementedError
         
     return train_transf, val_transf
-
 
 
 def setup_dataloaders(config):

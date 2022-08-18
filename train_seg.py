@@ -23,8 +23,9 @@ print_config()
 
 # enable cuDNN benchmark
 # torch.backends.cudnn.benchmark = True
-# torch.use_deterministic_algorithms(True)
 # torch.manual_seed(42)
+# torch.use_deterministic_algorithms(True)
+
 
 def one_epoch(model, 
               criterion, 

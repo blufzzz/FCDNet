@@ -313,7 +313,6 @@ def coverage(input, target):
     cardinality = target.sum(dim=(-1,-2,-3)) + 1e-10
     return (intersection/cardinality).mean()
 
-
 def false_positive(input, target):
     assert input.shape[1] == target.shape[1] 
     assert input.shape[1] == 1
