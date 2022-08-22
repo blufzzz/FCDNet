@@ -11,6 +11,41 @@ from celluloid import Camera
 import numpy as np
 from matplotlib import pyplot as plt
 
+
+def show_prediction_slice(i, brain_tensor, mask_tensor, label_tensor, label_tensor_predicted, b_ind=0, c_ind=0):
+    
+    '''
+    b_ind - batch_index
+    c_ind - channel index for `brain_tensor`
+    brain_tensor - [bs,C,1,H,W,D]
+    mask_tensor - [bs,1,1,H,W,D]
+    label_tensor - [bs,1,1,H,W,D]
+    label_tensor_predicted - [bs,1,1,H,W,D]
+    '''
+    
+    label_pos = (label_tensor[b_ind,0] > 0).sum(dim=(0,1)).argmax().item()
+    
+    fig = plt.figure("image", (3*5, 5), dpi=100)
+    
+    ax1 = plt.subplot(1, 3, 1)
+    ax1.imshow(to_numpy(brain_tensor[b_ind,c_ind,:,:,label_pos]), cmap='gray')
+    # ax1.imshow(to_numpy(mask_tensor[b_ind,0,:,:,label_pos]), alpha=0.2, cmap='Reds')
+    ax1.imshow(to_numpy(label_tensor[b_ind,0,:,:,label_pos]), alpha=0.6, cmap='Reds')
+    
+    ax2 = plt.subplot(1, 3, 2)
+    ax2.imshow(to_numpy(brain_tensor[b_ind,c_ind,:,:,label_pos]), cmap='gray')
+    # ax2.imshow(to_numpy(mask_tensor[b_ind,0,:,:,label_pos]), alpha=0.2, cmap='Reds')
+    ax2.imshow(to_numpy(label_tensor_predicted[b_ind,0,:,:,label_pos]), alpha=0.6, cmap='Reds')
+    
+    ax3 = plt.subplot(1, 3, 3)
+    ax3.imshow(to_numpy(brain_tensor[b_ind,c_ind+1,:,:,label_pos]), cmap='jet')
+    
+    plt.xticks([])
+    plt.yticks([])
+    
+    plt.savefig(f'inference_img/val_inference_{i}.png')
+
+
 def get_latest_weights(logdir, number=None):
     
     checkpoints_path = os.path.join(logdir, 'checkpoints')
