@@ -76,10 +76,10 @@ def metric_clusters(input_scan, labels):
 
 def metric_clusters_feature(feature):
     print(f'Start for sub {feature}')
-    subs_ = pd.read_csv('./Tabels/FCNN.csv').iloc[:,0].values
+    subs_ = pd.read_csv('./Tables/FCNN.csv').iloc[:,0].values
     detection_table = np.zeros((len(subs_), 3))
     try:
-        df_ = pd.read_csv(f'./Tabels/{feature}_clusters.csv')
+        df_ = pd.read_csv(f'./Tables/{feature}_clusters.csv')
         indeces_ = np.where((df_.iloc[:,2].values+df_.iloc[:,3].values)>0)[0]
         indeces = np.where((df_.iloc[:,2].values+df_.iloc[:,3].values)<=0)[0]
         subs = subs_[indeces]
