@@ -17,15 +17,18 @@ from models.v2v import V2VModel
 
 from losses import *
 from dataset import setup_dataloaders
-from utils import save, get_capacity, calc_gradient_norm, get_label
+from utils import save, get_capacity, calc_gradient_norm, get_label, to_numpy, show_prediction_slice
 from monai.config import print_config
+import matplotlib.pyplot as plt
+plt.ion() 
+
 print_config()
+
 
 # enable cuDNN benchmark
 # torch.backends.cudnn.benchmark = True
 # torch.manual_seed(42)
 # torch.use_deterministic_algorithms(True)
-
 
 def one_epoch(model, 
               criterion, 
@@ -59,11 +62,10 @@ def one_epoch(model,
         iterator = enumerate(dataloader)
         val_predictions = {}
         for iter_i, data_tensors in iterator:
-            brain_tensor, label_tensor, mask_tensor = (
-                                                        data_tensors['image'].to(device),
-                                                        data_tensors['seg'].to(device),
-                                                        data_tensors['mask'].to(device)
-                                                        )
+            brain_tensor, label_tensor, mask_tensor = (data_tensors['image'].to(device),
+                                                       data_tensors['seg'].to(device),
+                                                       data_tensors['mask'].to(device)
+                                                       )
             
             # forward pass
             t1 = time.time()
@@ -100,6 +102,16 @@ def one_epoch(model,
             metric_dict[f'batch_time'].append(dt)
             metric_dict[f'{loss_name}'].append(loss.item())
             label_tensor_predicted = label_tensor_predicted * mask_tensor
+            
+            if hasattr(config.opt, 'save_inference') and config.opt.save_inference:
+                show_prediction_slice(iter_i, 
+                                      brain_tensor, 
+                                      mask_tensor, 
+                                      label_tensor, 
+                                      label_tensor_predicted, 
+                                      b_ind=0, 
+                                      c_ind=0)
+            
             cov = coverage(label_tensor_predicted, label_tensor).item()
             fp = false_positive(label_tensor_predicted, label_tensor).item()
             fn = false_negative(label_tensor_predicted, label_tensor).item()
@@ -126,9 +138,6 @@ def one_epoch(model,
                 message+=f' {title}:{v}'
             print(message)
 
-            # print(f'Epoch: {epoch}, Iter: {iter_i}, \n \
-            #         Loss_{loss_name}: {loss.item()}, Dice-score: {dice}, \n \
-            #         time: {np.round(dt,2)}-s')
 
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
@@ -216,12 +225,9 @@ def main(args):
     print(f'Model created! Capacity: {capacity}')
 
     if hasattr(config.model, 'weights'):
-        #files = os.listdir(path)
-        #paths = [os.path.join(path, basename) for basename in files]
-        #weights_filename_latest = max(paths, key=os.path.getctime)
-        model_dict = torch.load(os.path.join(config.model.weights, 'checkpoints/weights_.pth'))
+        model_dict = torch.load(config.model.weights, map_location='cpu')
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])
-        model.load_state_dict(model_dict['model_state'])
+        model.load_state_dict(model_dict['model_state'])#.to(device)
 
     ################
     # CREATE OPTIM #
@@ -255,6 +261,7 @@ def main(args):
     target_metric_prev = -1
     try:
         for epoch in range(config.opt.start_epoch, config.opt.n_epochs):
+            
             print (f'TRAIN EPOCH: {epoch} ... ')
             n_iters_total_train, _  = one_epoch(model, 
                                             criterion, 
