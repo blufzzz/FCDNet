@@ -1,9 +1,11 @@
-import os, re
+import os, re, sys, tqdm
+from abc import ABC, abstractmethod
 from collections import defaultdict
 import numpy as np
 from monai.data import create_test_image_3d, list_data_collate, decollate_batch, pad_list_data_collate
 import monai
-from monai.data import DataLoader, Dataset 
+from monai.data import DataLoader, Dataset, CacheDataset
+from monai.apps import CrossValidation
 from monai.transforms import (
     LoadImage, EnsureChannelFirst, Spacing,
     RandFlip, Resize, EnsureType,
@@ -15,9 +17,11 @@ from monai.transforms import (
     RandShiftIntensityd, MaskIntensityd
 )
 
+
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
 from IPython.core.debugger import set_trace
+
 
 BASE_DIR = '/workspace/RawData/Features'
 
@@ -132,7 +136,6 @@ def create_datafile(sub_list, feat_params, mask=False):
     return files, missing_files
 
 
-
 def setup_datafiles(split_dict, config):
 
     '''
@@ -178,6 +181,7 @@ def mask_transform(data_dict):
     data_dict["mask"] = (data_dict["mask"] > 0).astype(data_dict["image"].dtype)
     data_dict["image"] = data_dict["image"] * (data_dict["mask"])
     return data_dict
+
 
 def setup_transformations(config):
     
@@ -259,3 +263,64 @@ def setup_dataloaders(config):
                             )
     
     return train_loader, val_loader
+
+
+@abstractmethod
+class CVDataset(ABC, CacheDataset):
+    """
+    Base class to generate cross validation datasets.
+
+    """
+    def __init__(
+        self,
+        data,
+        transform,
+        cache_num=sys.maxsize,
+        cache_rate=1.0,
+        num_workers=None,
+    ) -> None:
+        data = self._split_datalist(datalist=data)
+        CacheDataset.__init__(
+            self, data, transform, cache_num=cache_num, cache_rate=cache_rate, num_workers=num_workers
+        )
+
+    def _split_datalist(self, datalist):
+        raise NotImplementedError(f"Subclass {self.__class__.__name__} must implement this method.")
+
+
+def setup_dataloaders_cv(config):
+    
+    metadata_path = config.dataset.metadata_path
+    subs_datadict = np.load('./metadata/cv_full_dataset_nG.npy',allow_pickle=True).item()
+    subs_datalist = subs_datadict.get('dataset')
+    
+    feat_params = config.dataset.features
+    dataset_filepaths = create_datafile(subs_datalist, feat_params, mask=True)
+    train_transf, val_transf = setup_transformations(config)
+    
+    num = 8
+    folds = list(range(num))
+
+    cvdataset = CrossValidation(
+        dataset_cls=CVDataset,
+        data=dataset_filepaths[0][:80], # Take 80 to k-folds - 10 will be test
+        nfolds=8,
+        seed=42,
+        transform=train_transf,
+    )
+    
+    train_dss = [cvdataset.get_dataset(folds=folds[0: i] + folds[(i + 1):]) for i in folds]
+    val_dss = [cvdataset.get_dataset(folds=i, transform=val_transf) for i in range(num)]
+    #test_ds = CacheDataset(data=dataset_filepaths[0][80:], transform=val_transf, num_workers=None)
+    
+    train_loaders = [DataLoader(train_dss[i], batch_size=2, shuffle=True, num_workers=0) for i in folds]
+    val_loaders = [DataLoader(val_dss[i], batch_size=1, num_workers=0) for i in folds]
+    #test_loader = DataLoader(test_ds, batch_size=1, num_workers=0)
+    
+    return train_loaders, val_loaders
+    
+    
+    
+    
+    
+    

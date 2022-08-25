@@ -16,10 +16,30 @@ import torch.optim as optim
 from models.v2v import V2VModel
 
 from losses import *
-from dataset import setup_dataloaders
+from dataset import setup_dataloaders, setup_datafiles, create_datafile, setup_transformations
 from utils import save, get_capacity, calc_gradient_norm, get_label, to_numpy, show_prediction_slice
+import monai
 from monai.config import print_config
+from monai.utils import set_determinism
 import matplotlib.pyplot as plt
+
+from monai.data import create_test_image_3d, list_data_collate, decollate_batch, pad_list_data_collate, DataLoader, Dataset, CacheDataset
+from monai.apps import CrossValidation
+from monai.transforms import (
+    LoadImage, EnsureChannelFirst, Spacing,
+    RandFlip, Resize, EnsureType,
+    LoadImaged, EnsureChannelFirstd,
+    Resized, EnsureTyped, Compose, ScaleIntensityd, 
+    AddChanneld, MapTransform, AsChannelFirstd, EnsureType, 
+    Activations, AsDiscrete, RandCropByPosNegLabeld, 
+    RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined,
+    RandShiftIntensityd, MaskIntensityd
+)
+
+
+from monai.transforms.intensity.array import ScaleIntensity
+import torch
+
 plt.ion() 
 
 print_config()
@@ -168,10 +188,9 @@ def one_epoch(model,
     return n_iters_total, target_metric
 
 
-def main(args):
+def main(i):
     
-    config = configdot.parse_config('configs/config.ini')
-    
+    config = configdot.parse_config('configs/config-cv.ini')
     ##################
     # SETTING DEVICE #
     ##################
@@ -193,7 +212,7 @@ def main(args):
     MAKE_LOGS = config.default.make_logs
     SAVE_MODEL = config.opt.save_model if hasattr(config.opt, "save_model") else True
 
-    experiment_name = '{}@{}'.format(config.default.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H"))
+    experiment_name = '{}@{}@fold-{}'.format(config.default.experiment_comment, datetime.now().strftime("%d.%m.%Y-%H"), i)
     print("Experiment name: {}".format(experiment_name))
 
     writer = None
@@ -203,7 +222,7 @@ def main(args):
         if os.path.isdir(experiment_dir):
             shutil.rmtree(experiment_dir)
         os.makedirs(experiment_dir)
-        shutil.copy('configs/config.ini', os.path.join(experiment_dir, "config.ini"))
+        shutil.copy('configs/config-cv.ini', os.path.join(experiment_dir, "config-cv.ini"))
 
         # create dir for best_val_predictions
         if config.dataset.save_best_val_predictions:
@@ -251,9 +270,47 @@ def main(args):
     ######################
     # CREATE DATALOADERS #
     ######################
-    train_loader, val_loader = setup_dataloaders(config)
+    
+    metadata_path = config.dataset.metadata_path
+    split_dict = np.load(metadata_path, allow_pickle=True)
+    train_list = split_dict[i].get('train')
+    val_list = split_dict[i].get('val')
 
-    print('Start training!')
+    images_list = []
+    feat_params = config.dataset.features
+    
+    # Flag to add mask as additional sequence to Subset
+    add_mask = config.dataset.trim_background
+    
+    train_files, train_missing_files = create_datafile(train_list, feat_params, mask=add_mask)
+    val_files, val_missing_files = create_datafile(val_list, feat_params, mask=add_mask)
+    
+    train_transf, val_transf = setup_transformations(config)
+    
+    # training dataset
+    train_ds = monai.data.Dataset(data=train_files, transform=train_transf)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=config.opt.train_batch_size,
+        shuffle=config.dataset.shuffle_train,
+        num_workers=0,
+        collate_fn=list_data_collate,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    # validation dataset
+    val_ds = monai.data.Dataset(data=val_files, transform=val_transf)
+    val_loader = DataLoader(val_ds, 
+                            batch_size=config.opt.val_batch_size, 
+                            num_workers=0, 
+                            collate_fn=list_data_collate,
+                            shuffle=False # important not to shuffle, to ensure label correspondence
+                            )
+
+    print(f'Start training for fold {i}')
+    print(split_dict[i])
+    np.save(os.path.join(experiment_dir, f'dataset-fold-{i}.npy'), split_dict[i])
+    
     metric_dict_epoch = defaultdict(list)
     n_iters_total_train = 0 
     n_iters_total_val = 0
@@ -302,11 +359,13 @@ def main(args):
         print(traceback.format_exc())
         #set_trace()
 
+        
 if __name__ == '__main__':
-    
+    set_determinism(seed=42)
     os.makedirs('./MONAI_TMP', exist_ok=True)
     os.environ['MONAI_DATA_DIRECTORY'] = "./MONAI_TMP"
     directory = os.environ.get("MONAI_DATA_DIRECTORY")
     root_dir = tempfile.mkdtemp() if directory is None else directory
-    args = None # everything in `config.ini` now
-    main(args)
+    #args = None # everything in `config.ini` now
+    num = 9  # Number of folds
+    [main(i) for i in range(num)]
