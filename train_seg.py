@@ -178,10 +178,11 @@ def main(args):
     print(torch.cuda.is_available())
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
-    torch.cuda.set_device(DEVICE)
-
     print('Setting GPU#:', DEVICE)
-    print('Using GPU#:', torch.cuda.current_device())
+    
+    if DEVICE != 'cpu':
+        torch.cuda.set_device(DEVICE)
+        print('Using GPU#:', torch.cuda.current_device())
 
     BASE_DIR = '/workspace/RawData/Features'
     OUTPUT_DIR = '/workspace/RawData/Features/BIDS'

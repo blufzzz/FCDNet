@@ -19,10 +19,11 @@ from monai.transforms.intensity.array import ScaleIntensity
 import torch
 from IPython.core.debugger import set_trace
 
+from utils import normalize, normalize_
+
 BASE_DIR = '/workspace/RawData/Features'
 
 FEATURES_LIST = ['image', 't2', 'flair', 'blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance', 'entropy']
-
 
 
 def assign_feature_maps(sub, feature):
@@ -117,11 +118,13 @@ def create_datafile(sub_list, feat_params, mask=False):
                     map_path = proposed_map_path
             
             if map_path is not None:
+                # feature path found and added to `image` field 
                 images_per_sub['image'].append(map_path)
             else:
                 missing_files['image'].append(proposed_map_path)
         
         seg_path = os.path.join(BASE_DIR, 'preprocessed_data/label_bernaskoni', f'{sub}.nii.gz')
+        
         if os.path.isfile(seg_path):
             images_per_sub['seg'] = seg_path
         else:
@@ -161,6 +164,7 @@ def setup_datafiles(split_dict, config):
     total_missing_files = 0
     for split_name, missing_files_dict  in {'train': train_missing_files, 
                                             'val': val_missing_files}.items():
+        
         for feature_type, missing_features_list in missing_files_dict.items():
     
             print(f'{split_name} missing {feature_type}:')
@@ -174,25 +178,67 @@ def setup_datafiles(split_dict, config):
 
 
 
+def minmax_scaling_specified(data_dict, features, scaling_dict):
+    '''
+    features - list of features e.g. ['image', 'curv', 'sulc',...]
+    scaling_dict - {
+                    'feature_name_1': [a_min, a_max], - use provided `a_min` and `a_max`
+                    'feature_name_2': None, - infer `a_min` and `a_max` from the data
+                    }
+    '''
+    mask_bool = data_dict["mask"][0] > 0.
+    for i, feature in enumerate(features):
+        v = scaling_dict[feature]
+        data_dict["image"][i][mask_bool] = normalize_(data_dict["image"][i][mask_bool], a_min_max=v)
+    return data_dict
+
+def minmax_scaling_specified_wrapper(features, scaling_dict):
+    '''
+    decorate `minmax_scaling_specified` with pre-specified `scaling_dict`
+    '''
+    def wrapper(data_dict):
+        return minmax_scaling_specified(data_dict, features=features, scaling_dict=scaling_dict)
+    return wrapper
+    
 def mask_transform(data_dict):
+    '''
+    data_dict - [C,H,W,D]
+    '''
     data_dict["mask"] = (data_dict["mask"] > 0).astype(data_dict["image"].dtype)
     data_dict["image"] = data_dict["image"] * (data_dict["mask"])
     return data_dict
 
-def setup_transformations(config):
-    
-    # assert False, 'Check mask mult!'
+def setup_transformations(config, scaling_dict=None):
     
     assert config.default.interpolate
+    
     spatial_size_conf = tuple(config.default.interpolation_size)
+    features = config.dataset.features
     
     assert config.dataset.trim_background
     keys=["image", "seg", "mask"]
     sep_k=["seg", "mask"]
-
+    
+    if scaling_dict is not None:
+        scaler = minmax_scaling_specified_wrapper(features, scaling_dict)
+    else:
+        scaler = ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True)
+        
+    # no-augmentation transformation
+    val_transf = Compose(
+                        [
+                            LoadImaged(keys=keys),
+                            EnsureChannelFirstd(keys=keys),
+                            Resized(keys=keys, spatial_size=spatial_size_conf),
+                            Spacingd(keys=sep_k, pixdim=1.0),
+                            mask_transform,
+                            scaler,
+                            EnsureTyped(keys=sep_k, dtype=torch.float),
+                        ]
+                        )
+        
     if config.opt.augmentation:
         rot_range = config.opt.rotation_range
-
         train_transf = Compose(
             [
                 LoadImaged(keys=keys),
@@ -205,27 +251,14 @@ def setup_transformations(config):
                 RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
                 Resized(keys=keys, spatial_size=spatial_size_conf),
                 Spacingd(keys=sep_k, pixdim=1.0),
-                ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
                 mask_transform, 
+                scaler,
                 EnsureTyped(keys=sep_k, dtype=torch.float),
             ]
         )
-
-        val_transf = Compose(
-            [
-                LoadImaged(keys=keys),
-                EnsureChannelFirstd(keys=keys),
-                Resized(keys=keys, spatial_size=spatial_size_conf),
-                Spacingd(keys=sep_k, pixdim=1.0),
-                ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
-                mask_transform,
-                EnsureTyped(keys=sep_k, dtype=torch.float),
-            ]
-        )
-
     else:
-        raise NotImplementedError
-        
+        train_transf = val_transf
+    
     return train_transf, val_transf
 
 
@@ -233,10 +266,18 @@ def setup_dataloaders(config):
     
     # load metadata: train-test split dict
     metadata_path = config.dataset.metadata_path
+    
+    scaling_dict = None
+    if hasattr(config.dataset, 'scaling_metadata_path'):
+        scaling_data_path = config.dataset.scaling_metadata_path
+        scaling_dict = np.load(scaling_data_path, allow_pickle=True).item()
+    else:
+        print('Warning! no SCALING METADATA used! Applying naive independent MinMax...')
+    
     split_dict = np.load(metadata_path, allow_pickle=True).item()   
     
     train_files, val_files = setup_datafiles(split_dict, config)
-    train_transf, val_transf = setup_transformations(config)
+    train_transf, val_transf = setup_transformations(config, scaling_dict)
     
     # training dataset
     train_ds = monai.data.Dataset(data=train_files, transform=train_transf)
@@ -246,16 +287,17 @@ def setup_dataloaders(config):
         shuffle=config.dataset.shuffle_train,
         num_workers=0,
         collate_fn=list_data_collate,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=torch.cuda.is_available()
     )
 
     # validation dataset
     val_ds = monai.data.Dataset(data=val_files, transform=val_transf)
     val_loader = DataLoader(val_ds, 
                             batch_size=config.opt.val_batch_size, 
+                            shuffle=False, # important not to shuffle, to ensure label correspondence
                             num_workers=0, 
                             collate_fn=list_data_collate,
-                            shuffle=False # important not to shuffle, to ensure label correspondence
+                            pin_memory=torch.cuda.is_available()
                             )
     
     return train_loader, val_loader

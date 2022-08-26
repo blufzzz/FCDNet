@@ -7,9 +7,15 @@ import os
 import nibabel
 import argparse
 import re
-from celluloid import Camera
 import numpy as np
 from matplotlib import pyplot as plt
+
+def get_label(path):
+    '''
+    Extracts label from path, e.g.:
+    '/workspace/RawData/Features/preprocessed_data/label_bernaskoni/n16.nii.gz' -> 'n16'
+    '''
+    return path.split('/')[-1].split('.')[0]
 
 
 def show_prediction_slice(i, brain_tensor, mask_tensor, label_tensor, label_tensor_predicted, b_ind=0, c_ind=0):
@@ -79,70 +85,6 @@ def get_capacity(model):
     return round(s_total / (10**6),2)
 
 
-def video(brain_tensor, mask_tensor=None, n_slides=100):
-
-    '''
-    brain_tensor - single ndarray brain [H,W,D]
-    mask_tensor - single nndarray [H,W,D] masks to show ober the brain 
-    '''
-    
-    fig, ax = plt.subplots()
-    X_max, Y_max, Z_max = brain_tensor.shape
-    camera = Camera(fig)
-    
-    for y_slice_pos in np.linspace(0,Y_max-1, n_slides, dtype=int):
-        
-        brain_tensor_slice = brain_tensor[:,y_slice_pos,:]
-        ax.imshow(brain_tensor_slice, 'gray')
-        
-        if mask_tensor is not None:
-            mask_tensor_slice = mask_tensor[:,y_slice_pos,:]
-            ax.imshow(mask_tensor_slice, 'jet', interpolation='none', alpha=0.7)
-        
-        camera.snap()
-        
-    
-    return camera   
-         
-
-def video_comparison(brains, masks=None, titles=None, n_slides=64):
-    
-    '''
-    brains - list of ndarray [H,W,D] brains 
-    masks - list of ndarray [H,W,D] masks to show ober the brain 
-
-    '''
-    
-    N = len(brains)
-    fig, ax = plt.subplots(1,N, sharex=True, sharey=True)
-    X_max, Y_max, Z_max = brains[0].shape
-    camera = Camera(fig)
-    
-    ax_iterator = ax if N > 1 else [ax]
-    
-    for y_slice_pos in np.linspace(0,Y_max-1, n_slides, dtype=int):
-        
-        for i,ax in enumerate(ax_iterator):
-            
-            brain_slice = brains[i][:,y_slice_pos,:]
-            ax.imshow(brain_slice, 'gray')
-            
-            try:
-                mask_slice = masks[i][:,y_slice_pos,:]
-                ax.imshow(mask_slice, 'jet', interpolation='none', alpha=0.7)
-            except:
-                pass
-            
-            try:
-                ax.set_title(titles[i])
-            except:
-                pass
-
-        camera.snap()
-        
-    return camera     
-
-
 
 def trim(brain_tensor, label_tensor, mask_tensor=None):
 
@@ -182,20 +124,26 @@ def trim(brain_tensor, label_tensor, mask_tensor=None):
     return brain_tensor_trim, label_tensor_trim, mask_tensor_trim
 
 
-def normalize_(brain_tensor):
-    return (brain_tensor - brain_tensor.min()) / (brain_tensor.max() - brain_tensor.min())
+def normalize_(brain_tensor, a_min_max=None):
+    if a_min_max is None:
+        a_min = brain_tensor.min()
+        a_max = brain_tensor.max()
+    else:
+        a_min, a_max = a_min_max
+    return (brain_tensor - a_min) / (a_max - a_min)
 
-def normalize(brain_tensor, mask=None):
-
+def normalize(brain_tensor, mask=None, a_min_max=None):
+    
     ndim = len(brain_tensor.shape)
 
     if mask is None:
         background = brain_tensor[0,0,0]
         brain_tensor = brain_tensor - background # make background-level pixel to be zero
-        mask = brain_tensor != background
-
-    brain_tensor[~mask] = 0
-    brain_tensor[mask] = normalize_(brain_tensor[mask])
+        mask = brain_tensor != 0
+    else:
+        brain_tensor[~mask] = 0
+        
+    brain_tensor[mask] = normalize_(brain_tensor[mask], a_min_max=a_min_max)
     
     return brain_tensor
 
