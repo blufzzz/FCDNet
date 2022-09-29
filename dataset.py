@@ -177,27 +177,26 @@ def setup_datafiles(split_dict, config):
     return train_files, val_files
 
 
-
-def minmax_scaling_specified(data_dict, features, scaling_dict):
+def scaling_specified(data_dict, features, scaling_dict):
     '''
     features - list of features e.g. ['image', 'curv', 'sulc',...]
     scaling_dict - {
-                    'feature_name_1': [a_min, a_max], - use provided `a_min` and `a_max`
-                    'feature_name_2': None, - infer `a_min` and `a_max` from the data
-                    }
+                    'feature_name_1': [a, b], - use provided `a` and `b` for (x-a)/b normalization
+                    'feature_name_2': None, - infer `a_min` and `a_max` from the data for min-max normalization
+                   }
     '''
     mask_bool = data_dict["mask"][0] > 0.
     for i, feature in enumerate(features):
         v = scaling_dict[feature]
-        data_dict["image"][i][mask_bool] = normalize_(data_dict["image"][i][mask_bool], a_min_max=v)
+        data_dict["image"][i][mask_bool] = normalize_(data_dict["image"][i][mask_bool], ab=v)
     return data_dict
 
-def minmax_scaling_specified_wrapper(features, scaling_dict):
+def scaling_specified_wrapper(features, scaling_dict):
     '''
     decorate `minmax_scaling_specified` with pre-specified `scaling_dict`
     '''
     def wrapper(data_dict):
-        return minmax_scaling_specified(data_dict, features=features, scaling_dict=scaling_dict)
+        return scaling_specified(data_dict, features=features, scaling_dict=scaling_dict)
     return wrapper
     
 def mask_transform(data_dict):
@@ -220,7 +219,7 @@ def setup_transformations(config, scaling_dict=None):
     sep_k=["seg", "mask"]
     
     if scaling_dict is not None:
-        scaler = minmax_scaling_specified_wrapper(features, scaling_dict)
+        scaler = scaling_specified_wrapper(features, scaling_dict)
     else:
         scaler = ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True)
         

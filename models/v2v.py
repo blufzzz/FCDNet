@@ -114,14 +114,14 @@ class EncoderDecorder(nn.Module):
         self.encoder_res4 = Res3DBlock(max_channel, max_channel)
         # [8]
         
-        # self.encoder_pool5 = Pool3DBlock(2)
+        self.encoder_pool5 = Pool3DBlock(2)
         self.encoder_res5 = Res3DBlock(max_channel, max_channel)
-        # [4] - [128, 4,4,4] -> too small!!!
+        # [4] - [128,4,4,4] -> too small!!!
         
         self.mid_res = Res3DBlock(max_channel, max_channel)
 
         self.decoder_res5 = Res3DBlock(max_channel, max_channel)
-        # self.decoder_upsample5 = Upsample3DBlock(max_channel, max_channel, 2, 2)
+        self.decoder_upsample5 = Upsample3DBlock(max_channel, max_channel, 2, 2)
 
         self.decoder_res4 = Res3DBlock(max_channel, max_channel)
         self.decoder_upsample4 = Upsample3DBlock(max_channel, max_channel, 2, 2)
@@ -153,13 +153,13 @@ class EncoderDecorder(nn.Module):
         x = self.encoder_res4(x)
 
         skip_x5 = self.skip_res5(x) # [8]
-        # x = self.encoder_pool5(x)
+        x = self.encoder_pool5(x)
         x = self.encoder_res5(x)
 
         x = self.mid_res(x)
 
         x = self.decoder_res5(x)
-        # x = self.decoder_upsample5(x)
+        x = self.decoder_upsample5(x)
         x = x + skip_x5 # [8] + [8]
 
         x = self.decoder_res4(x)
@@ -201,7 +201,6 @@ class V2VModel(nn.Module):
 
 
         self.front_layers = nn.Sequential(
-            # normalization(input_channels),
             Basic3DBlock(input_channels, 16, 7),
             Res3DBlock(16, 32),
             # Res3DBlock(32, 32),

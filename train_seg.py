@@ -24,7 +24,6 @@ plt.ion()
 
 print_config()
 
-
 # enable cuDNN benchmark
 # torch.backends.cudnn.benchmark = True
 # torch.manual_seed(42)
@@ -66,6 +65,9 @@ def one_epoch(model,
                                                        data_tensors['seg'].to(device),
                                                        data_tensors['mask'].to(device)
                                                        )
+            # print(torch.get_rng_state())
+            # print(brain_tensor[0,:,64,64,64])
+            # break
             
             # forward pass
             t1 = time.time()
@@ -138,7 +140,6 @@ def one_epoch(model,
                 message+=f' {title}:{v}'
             print(message)
 
-
             if is_train and writer is not None:
                 for title, value in metric_dict.items():
                     writer.add_scalar(f"{phase_name}_{title}", value[-1], n_iters_total)
@@ -179,6 +180,10 @@ def main(args):
     DEVICE = config.opt.device if hasattr(config.opt, "device") else 1
     device = torch.device(DEVICE)
     print('Setting GPU#:', DEVICE)
+    
+    seed = config.random_seed if hasattr(config, 'random_seed') else 42
+    torch.manual_seed(seed)
+    print('SEED: ', torch.get_rng_state())
     
     if DEVICE != 'cpu':
         torch.cuda.set_device(DEVICE)
@@ -224,7 +229,7 @@ def main(args):
 
     capacity = get_capacity(model)
     print(f'Model created! Capacity: {capacity}')
-
+    
     if hasattr(config.model, 'weights'):
         model_dict = torch.load(config.model.weights, map_location='cpu')
         print(f'LOADING from {config.model.weights} \n epoch:', model_dict['epoch'])

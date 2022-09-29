@@ -122,15 +122,18 @@ def trim(brain_tensor, label_tensor, mask_tensor=None):
     return brain_tensor_trim, label_tensor_trim, mask_tensor_trim
 
 
-def normalize_(brain_tensor, a_min_max=None):
-    if a_min_max is None:
+def normalize_(brain_tensor, ab=None):
+    if ab is None:
         a_min = brain_tensor.min()
         a_max = brain_tensor.max()
+        a = a_min
+        b = a_max - a_min
     else:
-        a_min, a_max = a_min_max
-    return (brain_tensor - a_min) / (a_max - a_min)
+        a, b = ab
+    return (brain_tensor - a) / b
 
-def normalize(brain_tensor, mask=None, a_min_max=None):
+
+def normalize(brain_tensor, mask=None, ab=None):
     
     ndim = len(brain_tensor.shape)
 
@@ -141,7 +144,7 @@ def normalize(brain_tensor, mask=None, a_min_max=None):
     else:
         brain_tensor[~mask] = 0
         
-    brain_tensor[mask] = normalize_(brain_tensor[mask], a_min_max=a_min_max)
+    brain_tensor[mask] = normalize_(brain_tensor[mask], ab=ab)
     
     return brain_tensor
 
