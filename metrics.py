@@ -23,7 +23,14 @@ def calculate_metrics(data_resica, data_active):
         thresh_val = 0
         tn, fp, fn, tp = confusion_matrix((data_active > 0.5).reshape(-1), (data_resica > thresh).reshape(-1)).ravel()
         large_enough = int((np.where((data_resica > thresh),1,0)).sum() > 800)
-        metrics.append([thresh, large_enough*tp/(tp+fp),large_enough*tp/(tp+fn),large_enough*tn/(tn+fp),large_enough*2*tp/(2*tp+fp+fn)])
+        metrics.append([
+                        thresh,
+                        large_enough*tp/(tp+fp),
+                        large_enough*tp/(tp+fn),
+                        large_enough*tn/(tn+fp),
+                        large_enough*2*tp/(2*tp+fp+fn),
+                        large_enough*(tp+tn)/(tp+tn+fp+fn),
+                        large_enough*tp/(data_resica > thresh).reshape(-1).size])
         
     metrics = np.nan_to_num(np.array(metrics))
     
@@ -33,5 +40,7 @@ def calculate_metrics(data_resica, data_active):
     Sensitivity = metrics[ind,2]
     Specificity = metrics[ind,3]
     Dice = metrics[ind,4]
+    Accuracy = metrics[ind,5]
+    #Accuracy_tp = metrics[ind,6]
     
-    return Precision,Sensitivity,Specificity,Dice,intensity
+    return Precision,Sensitivity,Specificity,Dice,intensity,Accuracy

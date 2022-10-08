@@ -14,12 +14,15 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 import torch.optim as optim
 from models.v2v import V2VModel
+from monai.networks.nets import VNet
 
 from losses import *
 from dataset import setup_dataloaders
 from utils import save, get_capacity, calc_gradient_norm, get_label, to_numpy, show_prediction_slice
 from monai.config import print_config
 import matplotlib.pyplot as plt
+from torchinfo import summary
+
 plt.ion() 
 
 print_config()
@@ -219,8 +222,10 @@ def main(args):
     if config.model.name == "v2v":
         model = V2VModel(config).to(device)
     else:
-        raise NotImplementedError
-
+        model = VNet(spatial_dims=3, in_channels=2, out_channels=1,dropout_prob=0.1, dropout_dim=3).to(device)
+        
+    summary(model)
+    
     capacity = get_capacity(model)
     print(f'Model created! Capacity: {capacity}')
 
