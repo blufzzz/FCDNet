@@ -5,19 +5,19 @@ from monai.data import create_test_image_3d, list_data_collate, decollate_batch,
 import monai
 from monai.data import DataLoader, Dataset 
 from monai.transforms import (
-    LoadImage, EnsureChannelFirst, Spacing,
-    RandFlip, Resize, EnsureType,
+    LoadImage, Spacingd, RandZoomd,
+    RandFlipd, Resized, RandAffined,
     LoadImaged, EnsureChannelFirstd,
     Resized, EnsureTyped, Compose, ScaleIntensityd, 
-    AddChanneld, MapTransform, AsChannelFirstd, EnsureType, 
-    Activations, AsDiscrete, RandCropByPosNegLabeld, 
-    RandRotate90d, LabelToMaskd, RandFlipd, RandRotated, Spacingd, RandAffined,
-    RandShiftIntensityd, MaskIntensityd
+    RandGaussianNoised, RandRotated
 )
 
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
 from IPython.core.debugger import set_trace
+from torchio.transforms.preprocessing.intensity import histogram_standardization
+from torchio.transforms.preprocessing.intensity import z_normalization
+from pathlib import Path
 
 from utils import normalize, normalize_
 
@@ -198,6 +198,40 @@ def scaling_specified_wrapper(features, scaling_dict):
     def wrapper(data_dict):
         return scaling_specified(data_dict, features=features, scaling_dict=scaling_dict)
     return wrapper
+
+def scaling_as_torchio(data_dict, features, scaling_dict):
+    mask_bool = data_dict["mask"] > 0.
+    features_ = features
+    for i, feature in enumerate(features_):
+        #  condition, beceause some features like curv, sulc, thickness - don't need in scale, however, can be done.
+        if feature not in ['blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'variance', 'entropy']:
+            landmarks_path = Path(f'/workspace/FCDNet/landmarks/{feature}_landmarks.npy')
+        else:
+            landmarks_path = Path(f'/workspace/FCDNet/landmarks/{feature}_False_landmarks.npy')
+        landmark =  np.load(landmarks_path)
+        d = torch.tensor(data_dict["image"][i])
+        m = torch.tensor(mask_bool)
+        d_n = histogram_standardization.normalize(d, landmark, m)
+        tensor = z_normalization.ZNormalization.znorm(d_n, m)
+        if tensor is not None:
+            data_dict["image"][i] = tensor
+    return data_dict
+
+def scaling_torchio_wrapper(features, scaling_dict):
+    '''
+    decorate `minmax_scaling_specified` with pre-specified `scaling_dict`
+    '''
+    def wrapper(data_dict):
+        return scaling_as_torchio(data_dict, features=features, scaling_dict=scaling_dict)
+    return wrapper
+    
+def binarize_target(data_dict, eps=1e-3):
+    '''
+    data_dict - [C,H,W,D]
+    '''
+    data_dict["seg"] = (data_dict["seg"] > eps).astype(data_dict["seg"].dtype)
+    return data_dict
+    
     
 def mask_transform(data_dict):
     '''
@@ -209,16 +243,18 @@ def mask_transform(data_dict):
 
 def setup_transformations(config, scaling_dict=None):
     
-    assert config.default.interpolate
-    
-    spatial_size_conf = tuple(config.default.interpolation_size)
+    interpolate = config.default.interpolate
+    if interpolate:
+        spatial_size_conf = tuple(config.default.interpolation_size)
     features = config.dataset.features
     
     assert config.dataset.trim_background
     keys=["image", "seg", "mask"]
     sep_k=["seg", "mask"]
     
-    if scaling_dict is not None:
+    if scaling_dict in 'torchio':
+        scaler = scaling_torchio_wrapper(features, scaling_dict)
+    elif scaling_dict in 'scale_metadata':
         scaler = scaling_specified_wrapper(features, scaling_dict)
     else:
         scaler = ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True)
@@ -227,47 +263,94 @@ def setup_transformations(config, scaling_dict=None):
     val_transf = Compose(
                         [
                             LoadImaged(keys=keys),
-                            EnsureChannelFirstd(keys=keys),
-                            Resized(keys=keys, spatial_size=spatial_size_conf),
+                            EnsureChannelFirstd(keys=keys)
+                        ] + ([Resized(keys=keys, spatial_size=spatial_size_conf)] if interpolate else []) + \
+                        [
                             Spacingd(keys=sep_k, pixdim=1.0),
-                            mask_transform,
+                            mask_transform, # zero the non-mask values
+                            binarize_target,
                             scaler,
                             EnsureTyped(keys=sep_k, dtype=torch.float),
                         ]
                         )
         
     if config.opt.augmentation:
+        
+        rand_affine_prob = config.opt.rand_affine_prob
         rot_range = config.opt.rotation_range
-        train_transf = Compose(
-            [
-                LoadImaged(keys=keys),
-                EnsureChannelFirstd(keys=keys),
-                RandRotated(keys=keys, 
-                            range_x=rot_range, 
-                            range_y=rot_range, 
-                            range_z=rot_range, 
-                            prob=0.5),
-                RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
-                Resized(keys=keys, spatial_size=spatial_size_conf),
-                Spacingd(keys=sep_k, pixdim=1.0),
-                mask_transform, 
-                scaler,
-                EnsureTyped(keys=sep_k, dtype=torch.float),
-            ]
-        )
+        shear_range = config.opt.shear_range
+        scale_range = config.opt.scale_range
+        translate_range = config.opt.translate_range
+
+        noise_std = config.opt.noise_std
+        flip_prob = config.opt.flip_prob
+        rand_zoom_prob = config.opt.rand_zoom_prob
+        
+        # basic operations
+        transforms = [LoadImaged(keys=keys), 
+                      EnsureChannelFirstd(keys=keys),
+                      
+                     ] + ([Resized(keys=keys, spatial_size=spatial_size_conf)] if interpolate else []) + \
+                     [mask_transform,scaler, Spacingd(keys=sep_k, pixdim=1.0)]
+        
+        if rand_affine_prob == 0 and rot_range > 0:
+            transforms.append(RandRotated(keys=keys, # apply to all!
+                                range_x=rot_range, 
+                                range_y=rot_range, 
+                                range_z=rot_range, 
+                                prob=0.5)
+                             )
+        if flip_prob > 0:
+            transforms.append(RandFlipd(keys=keys, # apply to all!
+                                        prob=flip_prob, 
+                                        spatial_axis=0))
+            
+        if rand_affine_prob > 0:
+            transforms.append(RandAffined(prob=rand_affine_prob, 
+                                         rotate_range=[rot_range, rot_range, rot_range], 
+                                         shear_range=[shear_range, shear_range, shear_range], 
+                                         translate_range=[translate_range, translate_range, translate_range], 
+                                         scale_range=[scale_range, scale_range, scale_range], 
+                                         padding_mode='zeros',
+                                         keys=keys # apply to all!
+                                        )
+                             )
+
+        if noise_std > 0:
+            transforms.append(RandGaussianNoised(prob=0.5, 
+                                                mean=0.0, 
+                                                std=noise_std, 
+                                                keys=["image"]
+                                               )
+                             )
+                              
+        if rand_zoom_prob > 0:
+            transforms.append(RandZoomd(prob=0.5, min_zoom=0.9, max_zoom=1.1, keys=keys))
+        
+        # add the rest 
+        transforms.extend([ # zero the non-mask values
+                            binarize_target,
+                            EnsureTyped(keys=sep_k, dtype=torch.float),
+                         ]
+                        )
+        
+        train_transf = Compose(transforms)
     else:
         train_transf = val_transf
     
     return train_transf, val_transf
 
 
-def setup_dataloaders(config):
+def setup_dataloaders(config, pin_memory=True):
     
     # load metadata: train-test split dict
     metadata_path = config.dataset.metadata_path
     
     scaling_dict = None
-    if hasattr(config.dataset, 'scaling_metadata_path'):
+    if config.dataset.scaling_method in 'torchio':
+        scaling_dict = 'torchio'
+    elif config.dataset.scaling_method in 'scale_metadata':
+        
         scaling_data_path = config.dataset.scaling_metadata_path
         scaling_dict = np.load(scaling_data_path, allow_pickle=True).item()
     else:
@@ -276,6 +359,7 @@ def setup_dataloaders(config):
     split_dict = np.load(metadata_path, allow_pickle=True).item()   
     
     train_files, val_files = setup_datafiles(split_dict, config)
+    print(f"Scaling Dict: {scaling_dict}")
     train_transf, val_transf = setup_transformations(config, scaling_dict)
     
     # training dataset
@@ -286,7 +370,7 @@ def setup_dataloaders(config):
         shuffle=config.dataset.shuffle_train,
         num_workers=0,
         collate_fn=list_data_collate,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available() and pin_memory
     )
 
     # validation dataset
@@ -296,7 +380,7 @@ def setup_dataloaders(config):
                             shuffle=False, # important not to shuffle, to ensure label correspondence
                             num_workers=0, 
                             collate_fn=list_data_collate,
-                            pin_memory=torch.cuda.is_available()
+                            pin_memory=torch.cuda.is_available() and pin_memory
                             )
     
     return train_loader, val_loader

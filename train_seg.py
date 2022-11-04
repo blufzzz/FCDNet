@@ -71,6 +71,7 @@ def one_epoch(model,
             # print(torch.get_rng_state())
             # print(brain_tensor[0,:,64,64,64])
             # break
+            # set_trace()
             
             # forward pass
             t1 = time.time()
@@ -90,7 +91,7 @@ def one_epoch(model,
                     if config.opt.use_scaler:
                         scaler.unscale_(opt)
                         torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                           config.opt.grad_clip)
+                                                       config.opt.grad_clip)
 
                 metric_dict['grad_norm'].append(calc_gradient_norm(filter(lambda x: x[1].requires_grad, 
                                                 model.named_parameters())))

@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 import torch.optim as optim
 from models.v2v import V2VModel
+from torchinfo import summary
 
 from losses import *
 from dataset import setup_dataloaders, setup_datafiles, create_datafile, setup_transformations
@@ -238,7 +239,9 @@ def main(i):
     if config.model.name == "v2v":
         model = V2VModel(config).to(device)
     else:
-        raise NotImplementedError
+        model = VNet(spatial_dims=3, in_channels=2, out_channels=1,dropout_prob=0.1, dropout_dim=3).to(device)
+        
+    summary(model)
 
     capacity = get_capacity(model)
     print(f'Model created! Capacity: {capacity}')
@@ -272,6 +275,14 @@ def main(i):
     ######################
     
     metadata_path = config.dataset.metadata_path
+    
+    scaling_dict = None
+    if hasattr(config.dataset, 'scaling_metadata_path'):
+        scaling_data_path = config.dataset.scaling_metadata_path
+        scaling_dict = np.load(scaling_data_path, allow_pickle=True).item()
+    else:
+        print('Warning! no SCALING METADATA used! Applying naive independent MinMax...')
+    
     split_dict = np.load(metadata_path, allow_pickle=True)
     train_list = split_dict[i].get('train')
     val_list = split_dict[i].get('val')
@@ -285,7 +296,7 @@ def main(i):
     train_files, train_missing_files = create_datafile(train_list, feat_params, mask=add_mask)
     val_files, val_missing_files = create_datafile(val_list, feat_params, mask=add_mask)
     
-    train_transf, val_transf = setup_transformations(config)
+    train_transf, val_transf = setup_transformations(config, scaling_dict)
     
     # training dataset
     train_ds = monai.data.Dataset(data=train_files, transform=train_transf)
@@ -367,5 +378,8 @@ if __name__ == '__main__':
     directory = os.environ.get("MONAI_DATA_DIRECTORY")
     root_dir = tempfile.mkdtemp() if directory is None else directory
     #args = None # everything in `config.ini` now
+    conf = configdot.parse_config('configs/config-cv.ini')
+    s = conf.dataset.ind_fold_start
+    e = conf.dataset.ind_fold_last
     num = 9  # Number of folds
-    [main(i) for i in range(num)]
+    [main(i) for i in range(s,e)]

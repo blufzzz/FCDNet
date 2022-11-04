@@ -92,10 +92,11 @@ class Upsample3DBlock(nn.Module):
 
 
 class EncoderDecorder(nn.Module):
-    def __init__(self, max_channel=128):
+    def __init__(self, max_channel=128, allow_matching_interpolation=False):
         super().__init__()
 
         intermediate_channel = max(max_channel//2, 32)
+        self.allow_matching_interpolation = allow_matching_interpolation
         
         # [128]
         self.encoder_pool1 = Pool3DBlock(2)
@@ -138,6 +139,13 @@ class EncoderDecorder(nn.Module):
         self.skip_res4 = Res3DBlock(max_channel, max_channel)
         self.skip_res5 = Res3DBlock(max_channel, max_channel)
 
+    def add_skip_connection(self, x, skip_x):
+        if self.allow_matching_interpolation:
+            size = skip_x.shape[2:]
+            x = nn.functional.interpolate(x, size)
+        return x + skip_x
+        
+        
     def forward(self, x):
         skip_x1 = self.skip_res1(x) # [128]
         x = self.encoder_pool1(x)
@@ -160,20 +168,21 @@ class EncoderDecorder(nn.Module):
 
         x = self.decoder_res5(x)
         x = self.decoder_upsample5(x)
-        x = x + skip_x5 # [8] + [8]
+        x = self.add_skip_connection(x, skip_x5)
+        # x = x + skip_x5 # [8] + [8]
 
         x = self.decoder_res4(x)
         x = self.decoder_upsample4(x)
-        x = x + skip_x4
+        x = self.add_skip_connection(x, skip_x4)
         x = self.decoder_res3(x)
         x = self.decoder_upsample3(x)
-        x = x + skip_x3
+        x = self.add_skip_connection(x, skip_x3)
         x = self.decoder_res2(x)
         x = self.decoder_upsample2(x)
-        x = x + skip_x2
+        x = self.add_skip_connection(x, skip_x2)
         x = self.decoder_res1(x)
         x = self.decoder_upsample1(x)
-        x = x + skip_x1
+        x = self.add_skip_connection(x, skip_x1)
 
         return x
 
@@ -182,6 +191,7 @@ class V2VModel(nn.Module):
         super().__init__()
 
         self.sigmoid = config.model.sigmoid
+        self.allow_matching_interpolation = config.model.allow_matching_interpolation
         input_channels = len(config.dataset.features)
         # add coordinates to model
         if hasattr(config.dataset, 'add_xyz') and config.dataset.add_xyz:
@@ -207,7 +217,7 @@ class V2VModel(nn.Module):
             Res3DBlock(32, 32)
         )
 
-        self.encoder_decoder = EncoderDecorder(max_channel)
+        self.encoder_decoder = EncoderDecorder(max_channel, self.allow_matching_interpolation)
 
         self.back_layers = nn.Sequential(
             Res3DBlock(32, 32),
@@ -222,7 +232,7 @@ class V2VModel(nn.Module):
     def forward(self, x):
 
         # x - [bs, C, x,x,x]
-
+        
         x = self.front_layers(x)
         x = self.encoder_decoder(x)
         x = self.back_layers(x)
