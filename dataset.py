@@ -211,7 +211,7 @@ def scaling_as_torchio(data_dict, features, scaling_dict):
         landmark =  np.load(landmarks_path)
         d = torch.tensor(data_dict["image"][i])
         m = torch.tensor(mask_bool)
-        d_n = histogram_standardization.normalize(d, landmark, m)
+        d_n = histogram_standardization._normalize(d, landmark, m)
         tensor = z_normalization.ZNormalization.znorm(d_n, m)
         if tensor is not None:
             data_dict["image"][i] = tensor

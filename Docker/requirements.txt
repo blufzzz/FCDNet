@@ -1,0 +1,16 @@
+numpy==1.23.4
+tqdm==4.45
+nibabel==3.2.0
+torch==1.8.1
+unet==0.7.3
+matplotlib==3.3.3
+IPython==7.9.0
+torchio==0.18.82
+monai==0.8.1
+nilearn==0.8.1
+jupyter
+jupyterlab
+jupyter-resource-usage
+tensorboardX==2.5.1
+configdot
+easydict

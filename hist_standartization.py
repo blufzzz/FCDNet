@@ -6,8 +6,10 @@ import multiprocessing
 from pathlib import Path
 
 import torch
+import glob
 #import torchvision
 import torchio as tio
+import tqdm
 import torch.nn.functional as F
 
 import numpy as np
@@ -112,31 +114,22 @@ train_list = split_dict.get('train')
 val_list = split_dict.get('test')
 subs = np.concatenate((train_list, val_list))
 Path(f'/workspace/FCDNet/landmarks').mkdir(exist_ok=True)
-
+c = 0
 for feature in ['image', 't2', 'flair', 'blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'thickness', 'curv', 'sulc', 'variance', 'entropy']:
-    mask_path = []
-    for n in [True, False]:
+    for n in [False]:
         image_paths = []
+        mask_paths = []
         for sub in subs:
             image_paths.append(assign_feature_maps(sub, feature, norm=n))
             mask_paths.append(assign_feature_maps(sub, 'mask'))
-        #subjects = []
-        #for image_path in image_paths:
-        #    subject = tio.Subject(
-        #        mri=tio.ScalarImage(image_path),
-        #    )
-        #    subjects.append(subject)
-        #dataset = tio.SubjectsDataset(subjects)
         if feature not in ['blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'variance', 'entropy']:
             landmarks_path = Path(f'/workspace/FCDNet/landmarks/{feature}_landmarks.npy')
         else:
             landmarks_path = Path(f'/workspace/FCDNet/landmarks/{feature}_{n}_landmarks.npy')
-        mask_path = ''
         landmarks = (
-            HistogramStandardization.train(image_paths, mask_path)
+            HistogramStandardization.train(image_paths, mask_path=mask_paths, output_path=landmarks_path)
         )
-        print(landmarks)
-        np.save(landmarks_path, landmarks)
+        #np.save(landmarks_path, landmarks)
         
         if feature not in ['blurring-t1', 'blurring-t2', 'blurring-Flair', 'cr-t2', 'cr-Flair', 'variance', 'entropy']:
             break
