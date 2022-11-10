@@ -209,12 +209,14 @@ def scaling_as_torchio(data_dict, features, scaling_dict):
         else:
             landmarks_path = Path(f'/workspace/FCDNet/landmarks/{feature}_False_landmarks.npy')
         landmark =  np.load(landmarks_path)
+        
         d = torch.tensor(data_dict["image"][i])
         m = torch.tensor(mask_bool)
         d_n = histogram_standardization._normalize(d, landmark, m)
         tensor = z_normalization.ZNormalization.znorm(d_n, m)
         if tensor is not None:
             data_dict["image"][i] = tensor
+            print(f'{feature} normalized: \n Min Value: {data_dict["image"][i].min()} \n Max Value: {data_dict["image"][i].max()}')
     return data_dict
 
 def scaling_torchio_wrapper(features, scaling_dict):

@@ -14,3 +14,4 @@ jupyter-resource-usage
 tensorboardX==2.5.1
 configdot
 easydict
+torchinfo==1.7.1
