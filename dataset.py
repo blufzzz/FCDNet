@@ -216,7 +216,7 @@ def scaling_as_torchio(data_dict, features, scaling_dict):
         tensor = z_normalization.ZNormalization.znorm(d_n, m)
         if tensor is not None:
             data_dict["image"][i] = tensor
-            print(f'{feature} normalized: \n Min Value: {data_dict["image"][i].min()} \n Max Value: {data_dict["image"][i].max()}')
+            #print(f'{feature} normalized: \n Min Value: {data_dict["image"][i].min()} \n Max Value: {data_dict["image"][i].max()}')
     return data_dict
 
 def scaling_torchio_wrapper(features, scaling_dict):
@@ -256,11 +256,12 @@ def setup_transformations(config, scaling_dict=None):
     
     if scaling_dict in 'torchio':
         scaler = scaling_torchio_wrapper(features, scaling_dict)
+        print(scaling_dict)
     elif scaling_dict in 'scale_metadata':
         scaler = scaling_specified_wrapper(features, scaling_dict)
     else:
         scaler = ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True)
-        
+    print(scaling_dict)  
     # no-augmentation transformation
     val_transf = Compose(
                         [

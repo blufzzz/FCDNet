@@ -40,6 +40,9 @@ from monai.transforms import (
 
 from monai.transforms.intensity.array import ScaleIntensity
 import torch
+import multiprocessing
+from multiprocessing import Pool
+import time
 
 plt.ion() 
 
@@ -277,7 +280,10 @@ def main(i):
     metadata_path = config.dataset.metadata_path
     
     scaling_dict = None
-    if hasattr(config.dataset, 'scaling_metadata_path'):
+    if config.dataset.scaling_method in 'torchio':
+        scaling_dict = 'torchio'
+    elif config.dataset.scaling_method in 'scale_metadata':
+        
         scaling_data_path = config.dataset.scaling_metadata_path
         scaling_dict = np.load(scaling_data_path, allow_pickle=True).item()
     else:
@@ -296,6 +302,7 @@ def main(i):
     train_files, train_missing_files = create_datafile(train_list, feat_params, mask=add_mask)
     val_files, val_missing_files = create_datafile(val_list, feat_params, mask=add_mask)
     
+    print(scaling_dict)
     train_transf, val_transf = setup_transformations(config, scaling_dict)
     
     # training dataset
@@ -381,5 +388,13 @@ if __name__ == '__main__':
     conf = configdot.parse_config('configs/config-cv.ini')
     s = conf.dataset.ind_fold_start
     e = conf.dataset.ind_fold_last
-    num = 9  # Number of folds
-    [main(i) for i in range(s,e)]
+    #num = 9  # Number of folds
+    p = multiprocessing.Pool(processes = 2)
+    start = time.time()
+    for i in range(s,e):
+        p.apply_async(main, [i])
+    p.close()
+    p.join()
+    print('Complete')
+    end = time.time()
+    print('total time (s)= ' + str(end-start))
